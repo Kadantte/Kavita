@@ -2,9 +2,14 @@ import { Component, OnInit } from '@angular/core';
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 import { ConfirmButton } from './_models/confirm-button';
 import { ConfirmConfig } from './_models/confirm-config';
+import {CommonModule} from "@angular/common";
+import {SafeHtmlPipe} from "../../_pipes/safe-html.pipe";
+import {TranslocoDirective} from "@jsverse/transloco";
 
 @Component({
   selector: 'app-confirm-dialog',
+  standalone: true,
+  imports: [CommonModule, SafeHtmlPipe, TranslocoDirective],
   templateUrl: './confirm-dialog.component.html',
   styleUrls: ['./confirm-dialog.component.scss']
 })

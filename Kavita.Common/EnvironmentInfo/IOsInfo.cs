@@ -1,26 +1,18 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
 
 namespace Kavita.Common.EnvironmentInfo;
 
-public class OsInfo : IOsInfo
+public static class OsInfo
 {
     public static Os Os { get; }
-
     public static bool IsNotWindows => !IsWindows;
     public static bool IsLinux => Os is Os.Linux or Os.LinuxMusl or Os.Bsd;
     public static bool IsOsx => Os == Os.Osx;
     public static bool IsWindows => Os == Os.Windows;
-
-    // this needs to not be static so we can mock it
-    public bool IsDocker { get; }
-
-    public string Version { get; }
-    public string Name { get; }
-    public string FullName { get; }
+    public static bool IsDocker =>
+        Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") == "true" ||
+        Environment.GetEnvironmentVariable("LSIO_FIRST_PARTY") == "true";
 
     static OsInfo()
     {
@@ -40,57 +32,6 @@ public class OsInfo : IOsInfo
                 Os = GetPosixFlavour();
                 break;
             }
-        }
-
-    }
-
-    public OsInfo(IEnumerable<IOsVersionAdapter> versionAdapters)
-    {
-        OsVersionModel osInfo = null;
-
-        foreach (var osVersionAdapter in versionAdapters.Where(c => c.Enabled))
-        {
-            try
-            {
-                osInfo = osVersionAdapter.Read();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("Couldn't get OS Version info: " + e.Message);
-            }
-
-            if (osInfo != null)
-            {
-                break;
-            }
-        }
-
-        if (osInfo != null)
-        {
-            Name = osInfo.Name;
-            Version = osInfo.Version;
-            FullName = osInfo.FullName;
-        }
-        else
-        {
-            Name = Os.ToString();
-            FullName = Name;
-        }
-
-        if (IsLinux && File.Exists("/proc/1/cgroup") && File.ReadAllText("/proc/1/cgroup").Contains("/docker/"))
-        {
-            IsDocker = true;
-        }
-    }
-
-    public OsInfo()
-    {
-        Name = Os.ToString();
-        FullName = Name;
-
-        if (IsLinux && File.Exists("/proc/1/cgroup") && File.ReadAllText("/proc/1/cgroup").Contains("/docker/"))
-        {
-            IsDocker = true;
         }
     }
 
@@ -140,14 +81,6 @@ public class OsInfo : IOsInfo
     }
 }
 
-public interface IOsInfo
-{
-    string Version { get; }
-    string Name { get; }
-    string FullName { get; }
-
-    bool IsDocker { get; }
-}
 
 public enum Os
 {

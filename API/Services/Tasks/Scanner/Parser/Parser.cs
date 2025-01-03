@@ -1,22 +1,35 @@
 using System;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using API.Entities.Enums;
+using API.Extensions;
 
 namespace API.Services.Tasks.Scanner.Parser;
+#nullable enable
 
-public static class Parser
+public static partial class Parser
 {
-    public const string DefaultChapter = "0";
-    public const string DefaultVolume = "0";
-    private const int RegexTimeoutMs = 5000000; // 500 ms
+    // NOTE: If you change this, don't forget to change in the UI (see Series Detail)
+    public const string DefaultChapter = "-100000"; // -2147483648
+    public const string LooseLeafVolume = "-100000";
+    public const int DefaultChapterNumber = -100_000;
+    public const int LooseLeafVolumeNumber = -100_000;
+    /// <summary>
+    /// The Volume Number of Specials to reside in
+    /// </summary>
+    public const int SpecialVolumeNumber = 100_000;
+    public const string SpecialVolume = "100000";
+
     public static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(500);
 
-    public const string ImageFileExtensions = @"^(\.png|\.jpeg|\.jpg|\.webp|\.gif)";
+    public const string ImageFileExtensions = @"^(\.png|\.jpeg|\.jpg|\.webp|\.gif|\.avif)"; // Don't forget to update CoverChooser
     public const string ArchiveFileExtensions = @"\.cbz|\.zip|\.rar|\.cbr|\.tar.gz|\.7zip|\.7z|\.cb7|\.cbt";
-    private const string BookFileExtensions = @"\.epub|\.pdf";
+    public const string EpubFileExtension = @"\.epub";
+    public const string PdfFileExtension = @"\.pdf";
+    private const string BookFileExtensions = EpubFileExtension + "|" + PdfFileExtension;
     private const string XmlRegexExtensions = @"\.xml";
     public const string MacOsMetadataFileStartsWith = @"._";
 
@@ -29,7 +42,7 @@ public static class Parser
     private static readonly ImmutableArray<string> FormatTagSpecialKeywords = ImmutableArray.Create(
         "Special", "Reference", "Director's Cut", "Box Set", "Box-Set", "Annual", "Anthology", "Epilogue",
         "One Shot", "One-Shot", "Prologue", "TPB", "Trade Paper Back", "Omnibus", "Compendium", "Absolute", "Graphic Novel",
-        "GN", "FCBD");
+        "GN", "FCBD", "Giant Size");
 
     private static readonly char[] LeadingZeroesTrimChars = new[] { '0' };
 
@@ -90,7 +103,17 @@ public static class Parser
     private static readonly Regex CoverImageRegex = new Regex(@"(?<![[a-z]\d])(?:!?)(?<!back)(?<!back_)(?<!back-)(cover|folder)(?![\w\d])",
         MatchOptions, RegexTimeout);
 
-    private static readonly Regex NormalizeRegex = new Regex(@"[^\p{L}0-9\+!]",
+    /// <summary>
+    /// Normalize everything within Kavita. Some characters don't fall under Unicode, like full-width characters and need to be
+    /// added on a case-by-case basis.
+    /// </summary>
+    private static readonly Regex NormalizeRegex = new Regex(@"[^\p{L}0-9\+!＊！＋]",
+        MatchOptions, RegexTimeout);
+
+    /// <summary>
+    /// Supports Batman (2020) or Batman (2)
+    /// </summary>
+    private static readonly Regex SeriesAndYearRegex = new Regex(@"^\D+\s\((?<Year>\d+)\)$",
         MatchOptions, RegexTimeout);
 
     /// <summary>
@@ -102,13 +125,17 @@ public static class Parser
 
     private static readonly Regex[] MangaVolumeRegex = new[]
     {
+        // Thai Volume: เล่ม n -> Volume n
+        new Regex(
+            @"(เล่ม|เล่มที่)(\s)?(\.?)(\s|_)?(?<Volume>\d+(\-\d+)?(\.\d+)?)",
+            MatchOptions, RegexTimeout),
         // Dance in the Vampire Bund v16-17
         new Regex(
             @"(?<Series>.*)(\b|_)v(?<Volume>\d+-?\d+)( |_)",
             MatchOptions, RegexTimeout),
-        // NEEDLESS_Vol.4_-Simeon_6_v2[SugoiSugoi].rar
+        // Nagasarete Airantou - Vol. 30 Ch. 187.5 - Vol.31 Omake
         new Regex(
-            @"(?<Series>.*)(\b|_)(?!\[)(vol\.?)(?<Volume>\d+(-\d+)?)(?!\])",
+            @"^(?<Series>.+?)(\s*Chapter\s*\d+)?(\s|_|\-\s)+(Vol(ume)?\.?(\s|_)?)(?<Volume>\d+(\.\d+)?)(.+?|$)",
             MatchOptions, RegexTimeout),
         // Historys Strongest Disciple Kenichi_v11_c90-98.zip or Dance in the Vampire Bund v16-17
         new Regex(
@@ -134,6 +161,7 @@ public static class Parser
         new Regex(
             @"(vol_)(?<Volume>\d+(\.\d)?)",
             MatchOptions, RegexTimeout),
+
         // Chinese Volume: 第n卷 -> Volume n, 第n册 -> Volume n, 幽游白书完全版 第03卷 天下 or 阿衰online 第1册
         new Regex(
             @"第(?<Volume>\d+)(卷|册)",
@@ -174,6 +202,10 @@ public static class Parser
 
     private static readonly Regex[] MangaSeriesRegex = new[]
     {
+        // Thai Volume: เล่ม n -> Volume n
+        new Regex(
+            @"(?<Series>.+?)(เล่ม|เล่มที่)(\s)?(\.?)(\s|_)?(?<Volume>\d+(\-\d+)?(\.\d+)?)",
+            MatchOptions, RegexTimeout),
         // Russian Volume: Том n -> Volume n, Тома n -> Volume
         new Regex(
             @"(?<Series>.+?)Том(а?)(\.?)(\s|_)?(?<Volume>\d+(?:(\-)\d+)?)",
@@ -194,16 +226,17 @@ public static class Parser
         new Regex(
             @"(?<Series>.*)(\b|_|-|\s)(?:sp)\d",
             MatchOptions, RegexTimeout),
-        // [SugoiSugoi]_NEEDLESS_Vol.2_-_Disk_The_Informant_5_[ENG].rar, Yuusha Ga Shinda! - Vol.tbd Chapter 27.001 V2 Infection ①.cbz
-        new Regex(
-            @"^(?<Series>.*)( |_)Vol\.?(\d+|tbd)",
-            MatchOptions, RegexTimeout),
         // Mad Chimera World - Volume 005 - Chapter 026.cbz (couldn't figure out how to get Volume negative lookaround working on below regex),
         // The Duke of Death and His Black Maid - Vol. 04 Ch. 054.5 - V4 Omake
         new Regex(
             @"(?<Series>.+?)(\s|_|-)+(?:Vol(ume|\.)?(\s|_|-)+\d+)(\s|_|-)+(?:(Ch|Chapter|Ch)\.?)(\s|_|-)+(?<Chapter>\d+)",
             MatchOptions,
             RegexTimeout),
+        // [SugoiSugoi]_NEEDLESS_Vol.2_-_Disk_The_Informant_5_[ENG].rar, Yuusha Ga Shinda! - Vol.tbd Chapter 27.001 V2 Infection ①.cbz,
+        // Nagasarete Airantou - Vol. 30 Ch. 187.5 - Vol.30 Omake
+        new Regex(
+            @"^(?<Series>.+?)(?:\s*|_|\-\s*)+(?:Ch(?:apter|\.|)\s*\d+(?:\.\d+)?(?:\s*|_|\-\s*)+)?Vol(?:ume|\.|)\s*(?:\d+|tbd)(?:\s|_|\-\s*).+",
+            MatchOptions, RegexTimeout),
         // Ichiban_Ushiro_no_Daimaou_v04_ch34_[VISCANS].zip, VanDread-v01-c01.zip
         new Regex(
             @"(?<Series>.*)(\b|_)v(?<Volume>\d+-?\d*)(\s|_|-)",
@@ -211,7 +244,7 @@ public static class Parser
             RegexTimeout),
         // Gokukoku no Brynhildr - c001-008 (v01) [TrinityBAKumA], Black Bullet - v4 c17 [batoto]
         new Regex(
-            @"(?<Series>.*)( - )(?:v|vo|c|chapters)\d",
+            @"(?<Series>.+?)( - )(?:v|vo|c|chapters)\d",
             MatchOptions, RegexTimeout),
         // Kedouin Makoto - Corpse Party Musume, Chapter 19 [Dametrans].zip
         new Regex(
@@ -230,6 +263,7 @@ public static class Parser
             @"(?<Series>.+?):?(\s|\b|_|-)Chapter(\s|\b|_|-)\d+(\s|\b|_|-)(vol)(ume)",
             MatchOptions,
             RegexTimeout),
+
         // [xPearse] Kyochuu Rettou Volume 1 [English] [Manga] [Volume Scans]
         new Regex(
             @"(?<Series>.+?):? (\b|_|-)(vol)(ume)",
@@ -237,7 +271,7 @@ public static class Parser
             RegexTimeout),
         //Knights of Sidonia c000 (S2 LE BD Omake - BLAME!) [Habanero Scans]
         new Regex(
-            @"(?<Series>.*)(\bc\d+\b)",
+            @"(?<Series>.*?)(?<!\()\bc\d+\b",
             MatchOptions, RegexTimeout),
         //Tonikaku Cawaii [Volume 11], Darling in the FranXX - Volume 01.cbz
         new Regex(
@@ -321,13 +355,13 @@ public static class Parser
         new Regex(
             @"(?<Series>.*)( ?- ?)Ch\.\d+-?\d*",
             MatchOptions, RegexTimeout),
-        // [BAA]_Darker_than_Black_Omake-1.zip
+        // Korean catch all for symbols 죠시라쿠! 2년 후 1권
         new Regex(
-            @"^(?!Vol)(?<Series>.*)(-)\d+-?\d*", // This catches a lot of stuff ^(?!Vol)(?<Series>.*)( |_)(\d+)
+            @"^(?!Vol)(?!Chapter)(?<Series>.+?)(-|_|\s|#)\d+(-\d+)?(권|화|話)",
             MatchOptions, RegexTimeout),
-        // Kodoja #001 (March 2016)
+        // [BAA]_Darker_than_Black_Omake-1, Bleach 001-002, Kodoja #001 (March 2016)
         new Regex(
-            @"(?<Series>.*)(\s|_|-)#",
+            @"^(?!Vol)(?!Chapter)(?<Series>.+?)(-|_|\s|#)\d+(-\d+)?",
             MatchOptions, RegexTimeout),
         // Baketeriya ch01-05.zip, Akiiro Bousou Biyori - 01.jpg, Beelzebub_172_RHS.zip, Cynthia the Mission 29.rar, A Compendium of Ghosts - 031 - The Third Story_ Part 12 (Digital) (Cobalt001)
         new Regex(
@@ -346,6 +380,10 @@ public static class Parser
 
     private static readonly Regex[] ComicSeriesRegex = new[]
     {
+        // Thai Volume: เล่ม n -> Volume n
+        new Regex(
+            @"(?<Series>.+?)(เล่ม|เล่มที่)(\s)?(\.?)(\s|_)?(?<Volume>\d+(\-\d+)?(\.\d+)?)",
+            MatchOptions, RegexTimeout),
         // Russian Volume: Том n -> Volume n, Тома n -> Volume
         new Regex(
             @"(?<Series>.+?)Том(а?)(\.?)(\s|_)?(?<Volume>\d+(?:(\-)\d+)?)",
@@ -434,6 +472,10 @@ public static class Parser
 
     private static readonly Regex[] ComicVolumeRegex = new[]
     {
+        // Thai Volume: เล่ม n -> Volume n
+        new Regex(
+            @"(เล่ม|เล่มที่)(\s)?(\.?)(\s|_)?(?<Volume>\d+(\-\d+)?(\.\d+)?)",
+            MatchOptions, RegexTimeout),
         // Teen Titans v1 001 (1966-02) (digital) (OkC.O.M.P.U.T.O.-Novus)
         new Regex(
             @"^(?<Series>.+?)(?: |_)(t|v)(?<Volume>" + NumberRange + @")",
@@ -470,6 +512,10 @@ public static class Parser
 
     private static readonly Regex[] ComicChapterRegex = new[]
     {
+        // Thai Volume: บทที่ n -> Chapter n, ตอนที่ n -> Chapter n
+        new Regex(
+            @"(บทที่|ตอนที่)(\s)?(\.?)(\s|_)?(?<Chapter>\d+(\-\d+)?(\.\d+)?)",
+            MatchOptions, RegexTimeout),
         // Batman & Wildcat (1 of 3)
         new Regex(
             @"(?<Series>.*(\d{4})?)( |_)(?:\((?<Chapter>\d+) of \d+)",
@@ -535,9 +581,13 @@ public static class Parser
 
     private static readonly Regex[] MangaChapterRegex = new[]
     {
+        // Thai Chapter: บทที่ n -> Chapter n, ตอนที่ n -> Chapter n, เล่ม n -> Volume n, เล่มที่ n -> Volume n
+        new Regex(
+            @"(?<Volume>((เล่ม|เล่มที่))?(\s|_)?\.?\d+)(\s|_)(บทที่|ตอนที่)\.?(\s|_)?(?<Chapter>\d+)",
+            MatchOptions, RegexTimeout),
         // Historys Strongest Disciple Kenichi_v11_c90-98.zip, ...c90.5-100.5
         new Regex(
-            @"(\b|_)(c|ch)(\.?\s?)(?<Chapter>(\d+(\.\d)?)-?(\d+(\.\d)?)?)",
+            @"(\b|_)(c|ch)(\.?\s?)(?<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)",
             MatchOptions, RegexTimeout),
         // [Suihei Kiki]_Kasumi_Otoko_no_Ko_[Taruby]_v1.1.zip
         new Regex(
@@ -555,9 +605,10 @@ public static class Parser
         new Regex(
             @"(Глава|глава|Главы|Глава)(\.?)(\s|_)?(?<Chapter>\d+(?:.\d+|-\d+)?)",
             MatchOptions, RegexTimeout),
+
         // Hinowa ga CRUSH! 018 (2019) (Digital) (LuCaZ).cbz, Hinowa ga CRUSH! 018.5 (2019) (Digital) (LuCaZ).cbz
         new Regex(
-            @"^(?!Vol)(?<Series>.+?)(?<!Vol)(?<!Vol.)\s(\d\s)?(?<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)",
+            @"^(?<Series>.+?)(?<!Vol)(?<!Vol.)(?<!Volume)\s(\d\s)?(?<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)",
             MatchOptions, RegexTimeout),
         // Tower Of God S01 014 (CBT) (digital).cbz
         new Regex(
@@ -618,7 +669,7 @@ public static class Parser
 
     private static readonly Regex ComicSpecialRegex = new Regex(
     // All Keywords, does not account for checking if contains volume/chapter identification. Parser.Parse() will handle.
-        $@"\b(?:{CommonSpecial}|\d.+?(\W|-|^)Annual|Annual(\W|-|$)|Book \d.+?|Compendium(\W|-|$|\s.+?)|Omnibus(\W|-|$|\s.+?)|FCBD \d.+?|Absolute(\W|-|$|\s.+?)|Preview(\W|-|$|\s.+?)|Hors[ -]S[ée]rie|TPB|HS|THS)\b",
+        $@"\b(?:{CommonSpecial}|\d.+?(\W|-|^)Annual|Annual(\W|-|$|\s#)|Book \d.+?|Compendium(\W|-|$|\s.+?)|Omnibus(\W|-|$|\s.+?)|FCBD \d.+?|Absolute(\W|-|$|\s.+?)|Preview(\W|-|$|\s.+?)|Hors[ -]S[ée]rie|TPB|HS|THS)\b",
         MatchOptions, RegexTimeout
     );
 
@@ -663,24 +714,39 @@ public static class Parser
     /// </summary>
     /// <param name="filePath"></param>
     /// <returns></returns>
-    public static bool HasSpecialMarker(string filePath)
+    public static bool HasSpecialMarker(string? filePath)
     {
+        if (string.IsNullOrEmpty(filePath)) return false;
         return SpecialMarkerRegex.IsMatch(filePath);
     }
 
-    public static bool IsMangaSpecial(string filePath)
+    public static int ParseSpecialIndex(string filePath)
     {
-        filePath = ReplaceUnderscores(filePath);
-        return  MangaSpecialRegex.IsMatch(filePath);
+        var match = SpecialMarkerRegex.Match(filePath).Value.Replace("SP", string.Empty);
+        if (string.IsNullOrEmpty(match)) return 0;
+        return int.Parse(match);
     }
 
-    public static bool IsComicSpecial(string filePath)
+    public static bool IsSpecial(string? filePath, LibraryType type)
     {
-        filePath = ReplaceUnderscores(filePath);
-        return ComicSpecialRegex.IsMatch(filePath);
+        return HasSpecialMarker(filePath);
     }
 
-    public static string ParseSeries(string filename)
+    private static bool IsMangaSpecial(string? filePath)
+    {
+        if (string.IsNullOrEmpty(filePath)) return false;
+        return HasSpecialMarker(filePath);
+    }
+
+    private static bool IsComicSpecial(string? filePath)
+    {
+        if (string.IsNullOrEmpty(filePath)) return false;
+        return HasSpecialMarker(filePath);
+    }
+
+
+
+    public static string ParseMangaSeries(string filename)
     {
         foreach (var regex in MangaSeriesRegex)
         {
@@ -688,7 +754,10 @@ public static class Parser
             var group = matches
                 .Select(match => match.Groups["Series"])
                 .FirstOrDefault(group => group.Success && group != Match.Empty);
-            if (group != null) return CleanTitle(group.Value);
+            if (group != null)
+            {
+                return CleanTitle(group.Value);
+            }
         }
 
         return string.Empty;
@@ -707,7 +776,7 @@ public static class Parser
         return string.Empty;
     }
 
-    public static string ParseVolume(string filename)
+    public static string ParseMangaVolume(string filename)
     {
         foreach (var regex in MangaVolumeRegex)
         {
@@ -722,7 +791,7 @@ public static class Parser
             }
         }
 
-        return DefaultVolume;
+        return LooseLeafVolume;
     }
 
     public static string ParseComicVolume(string filename)
@@ -740,8 +809,9 @@ public static class Parser
             }
         }
 
-        return DefaultVolume;
+        return LooseLeafVolume;
     }
+
 
     private static string FormatValue(string value, bool hasPart)
     {
@@ -752,13 +822,61 @@ public static class Parser
 
         var tokens = value.Split("-");
         var from = RemoveLeadingZeroes(tokens[0]);
+
         if (tokens.Length != 2) return from;
 
+        // Occasionally users will use c01-c02 instead of c01-02, clean any leftover c
+        if (tokens[1].StartsWith("c", StringComparison.InvariantCultureIgnoreCase))
+        {
+            tokens[1] = tokens[1].Replace("c", string.Empty, StringComparison.InvariantCultureIgnoreCase);
+        }
         var to = RemoveLeadingZeroes(hasPart ? AddChapterPart(tokens[1]) : tokens[1]);
         return $"{from}-{to}";
     }
 
-    public static string ParseChapter(string filename)
+    public static string ParseSeries(string filename, LibraryType type)
+    {
+        return type switch
+        {
+            LibraryType.Manga => ParseMangaSeries(filename),
+            LibraryType.Comic => ParseComicSeries(filename),
+            LibraryType.Book => ParseMangaSeries(filename),
+            LibraryType.Image => ParseMangaSeries(filename),
+            LibraryType.LightNovel => ParseMangaSeries(filename),
+            LibraryType.ComicVine => ParseComicSeries(filename),
+            _ => string.Empty
+        };
+    }
+
+    public static string ParseVolume(string filename, LibraryType type)
+    {
+        return type switch
+        {
+            LibraryType.Manga => ParseMangaVolume(filename),
+            LibraryType.Comic => ParseComicVolume(filename),
+            LibraryType.Book => ParseMangaVolume(filename),
+            LibraryType.Image => ParseMangaVolume(filename),
+            LibraryType.LightNovel => ParseMangaVolume(filename),
+            LibraryType.ComicVine => ParseComicVolume(filename),
+            _ => LooseLeafVolume
+        };
+    }
+
+    public static string ParseChapter(string filename, LibraryType type)
+    {
+        return type switch
+        {
+            LibraryType.Manga => ParseMangaChapter(filename),
+            LibraryType.Comic => ParseComicChapter(filename),
+            LibraryType.Book => ParseMangaChapter(filename),
+            LibraryType.Image => ParseMangaChapter(filename),
+            LibraryType.LightNovel => ParseMangaChapter(filename),
+            LibraryType.ComicVine => ParseComicChapter(filename),
+            _ => DefaultChapter
+        };
+    }
+
+    private static string ParseMangaChapter(string filename)
     {
         foreach (var regex in MangaChapterRegex)
         {
@@ -787,7 +905,7 @@ public static class Parser
         return $"{value}.5";
     }
 
-    public static string ParseComicChapter(string filename)
+    private static string ParseComicChapter(string filename)
     {
         foreach (var regex in ComicChapterRegex)
         {
@@ -848,15 +966,19 @@ public static class Parser
 
         title = RemoveEditionTagHolders(title);
 
-        if (isComic)
-        {
-            title = RemoveComicSpecialTags(title);
-            title = RemoveEuropeanTags(title);
-        }
-        else
-        {
-            title = RemoveMangaSpecialTags(title);
-        }
+        // if (replaceSpecials)
+        // {
+        //     if (isComic)
+        //     {
+        //         title = RemoveComicSpecialTags(title);
+        //         title = RemoveEuropeanTags(title);
+        //     }
+        //     else
+        //     {
+        //         title = RemoveMangaSpecialTags(title);
+        //     }
+        // }
+
 
         title = title.Trim(SpacesAndSeparators);
 
@@ -925,35 +1047,52 @@ public static class Parser
     {
         try
         {
-            if (!Regex.IsMatch(range, @"^[\d\-.]+$", MatchOptions, RegexTimeout))
+            // Check if the range string is not null or empty
+            if (string.IsNullOrEmpty(range) || !Regex.IsMatch(range, @"^[\d\-.]+$", MatchOptions, RegexTimeout))
             {
-                return (float) 0.0;
+                return 0.0f;
             }
 
-            var tokens = range.Replace("_", string.Empty).Split("-");
-            return tokens.Min(float.Parse);
+            // Check if there is a range or not
+            if (NumberRangeRegex().IsMatch(range))
+            {
+
+                var tokens = range.Replace("_", string.Empty).Split("-", StringSplitOptions.RemoveEmptyEntries);
+                return tokens.Min(t => t.AsFloat());
+            }
+
+            return range.AsFloat();
         }
-        catch
+        catch (Exception)
         {
-            return (float) 0.0;
+            return 0.0f;
         }
     }
+
 
     public static float MaxNumberFromRange(string range)
     {
         try
         {
-            if (!Regex.IsMatch(range, @"^[\d\-.]+$", MatchOptions, RegexTimeout))
+            // Check if the range string is not null or empty
+            if (string.IsNullOrEmpty(range) || !Regex.IsMatch(range, @"^[\d\-.]+$", MatchOptions, RegexTimeout))
             {
-                return (float) 0.0;
+                return 0.0f;
             }
 
-            var tokens = range.Replace("_", string.Empty).Split("-");
-            return tokens.Max(float.Parse);
+            // Check if there is a range or not
+            if (NumberRangeRegex().IsMatch(range))
+            {
+
+                var tokens = range.Replace("_", string.Empty).Split("-", StringSplitOptions.RemoveEmptyEntries);
+                return tokens.Max(t => t.AsFloat());
+            }
+
+            return range.AsFloat();
         }
-        catch
+        catch (Exception)
         {
-            return (float) 0.0;
+            return 0.0f;
         }
     }
 
@@ -1000,7 +1139,11 @@ public static class Parser
     /// <returns></returns>
     public static bool HasBlacklistedFolderInPath(string path)
     {
-        return path.Contains("__MACOSX") || path.StartsWith("@Recently-Snapshot") || path.StartsWith("@recycle") || path.StartsWith("._") || Path.GetFileName(path).StartsWith("._") || path.Contains(".qpkg");
+        return path.Contains("__MACOSX") || path.StartsWith("@Recently-Snapshot") || path.StartsWith("@recycle")
+               || path.StartsWith("._") || Path.GetFileName(path).StartsWith("._") || path.Contains(".qpkg")
+               || path.StartsWith("#recycle")
+               || path.Contains(".yacreaderlibrary")
+               || path.Contains(".caltrash");
     }
 
 
@@ -1044,7 +1187,7 @@ public static class Parser
     /// <returns></returns>
     public static string NormalizePath(string? path)
     {
-        return string.IsNullOrEmpty(path) ? string.Empty : path.Replace(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        return string.IsNullOrEmpty(path) ? string.Empty : path.Replace('\\', Path.AltDirectorySeparatorChar)
             .Replace(@"//", Path.AltDirectorySeparatorChar + string.Empty);
     }
 
@@ -1062,4 +1205,54 @@ public static class Parser
     {
         return string.IsNullOrEmpty(name) ? string.Empty : name.Replace('_', ' ');
     }
+
+    public static string? ExtractFilename(string fileUrl)
+    {
+        var matches = Parser.CssImageUrlRegex.Matches(fileUrl);
+        foreach (Match match in matches)
+        {
+            if (!match.Success) continue;
+
+            // NOTE: This is failing for //localhost:5000/api/book/29919/book-resources?file=OPS/images/tick1.jpg
+            var importFile = match.Groups["Filename"].Value;
+            if (!importFile.Contains('?')) return importFile;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// If the name matches exactly Series (Volume digits)
+    /// </summary>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    public static bool IsSeriesAndYear(string? name)
+    {
+        return !string.IsNullOrEmpty(name) && SeriesAndYearRegex.IsMatch(name);
+    }
+
+    public static string ParseYear(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return string.Empty;
+        var match = SeriesAndYearRegex.Match(name);
+        if (!match.Success) return string.Empty;
+
+        return match.Groups["Year"].Value;
+    }
+
+    public static string? RemoveExtensionIfSupported(string? filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return filename;
+
+        if (SupportedExtensionsRegex().IsMatch(filename))
+        {
+            return SupportedExtensionsRegex().Replace(filename, string.Empty);
+        }
+        return filename;
+    }
+
+    [GeneratedRegex(SupportedExtensions)]
+    private static partial Regex SupportedExtensionsRegex();
+    [GeneratedRegex(@"\d-{1}\d")]
+    private static partial Regex NumberRangeRegex();
 }

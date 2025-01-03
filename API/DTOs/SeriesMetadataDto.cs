@@ -1,5 +1,4 @@
 ﻿using System.Collections.Generic;
-using API.DTOs.CollectionTags;
 using API.DTOs.Metadata;
 using API.Entities.Enums;
 
@@ -9,11 +8,6 @@ public class SeriesMetadataDto
 {
     public int Id { get; set; }
     public string Summary { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Collections the Series belongs to
-    /// </summary>
-    public ICollection<CollectionTagDto> CollectionTags { get; set; } = new List<CollectionTagDto>();
 
     /// <summary>
     /// Genres for the Series
@@ -30,10 +24,14 @@ public class SeriesMetadataDto
     public ICollection<PersonDto> Characters { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Pencillers { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Inkers { get; set; } = new List<PersonDto>();
+    public ICollection<PersonDto> Imprints { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Colorists { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Letterers { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Editors { get; set; } = new List<PersonDto>();
     public ICollection<PersonDto> Translators { get; set; } = new List<PersonDto>();
+    public ICollection<PersonDto> Teams { get; set; } = new List<PersonDto>();
+    public ICollection<PersonDto> Locations { get; set; } = new List<PersonDto>();
+
     /// <summary>
     /// Highest Age Rating from all Chapters
     /// </summary>
@@ -58,6 +56,10 @@ public class SeriesMetadataDto
     /// Publication status of the Series
     /// </summary>
     public PublicationStatus PublicationStatus { get; set; }
+    /// <summary>
+    /// A comma-separated list of Urls
+    /// </summary>
+    public string WebLinks { get; set; }
 
     public bool LanguageLocked { get; set; }
     public bool SummaryLocked { get; set; }
@@ -71,16 +73,19 @@ public class SeriesMetadataDto
     public bool PublicationStatusLocked { get; set; }
     public bool GenresLocked { get; set; }
     public bool TagsLocked { get; set; }
-    public bool WritersLocked { get; set; }
-    public bool CharactersLocked { get; set; }
-    public bool ColoristsLocked { get; set; }
-    public bool EditorsLocked { get; set; }
-    public bool InkersLocked { get; set; }
-    public bool LetterersLocked { get; set; }
-    public bool PencillersLocked { get; set; }
-    public bool PublishersLocked { get; set; }
-    public bool TranslatorsLocked { get; set; }
-    public bool CoverArtistsLocked { get; set; }
+    public bool WriterLocked { get; set; }
+    public bool CharacterLocked { get; set; }
+    public bool ColoristLocked { get; set; }
+    public bool EditorLocked { get; set; }
+    public bool InkerLocked { get; set; }
+    public bool ImprintLocked { get; set; }
+    public bool LettererLocked { get; set; }
+    public bool PencillerLocked { get; set; }
+    public bool PublisherLocked { get; set; }
+    public bool TranslatorLocked { get; set; }
+    public bool TeamLocked { get; set; }
+    public bool LocationLocked { get; set; }
+    public bool CoverArtistLocked { get; set; }
     public bool ReleaseYearLocked { get; set; }
 
 

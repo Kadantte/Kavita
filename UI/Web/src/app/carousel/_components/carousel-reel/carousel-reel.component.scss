@@ -4,12 +4,14 @@
     position: relative;
     display: flex;
     flex-direction: column;
+    mask-image: linear-gradient(to right, transparent, black 0%, black 99%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent, black 0%, black 99%, transparent 100%);
 }
 
 .carousel-container {
     .section-title {
         font-weight: 400;
-        margin-left: 10px;
+        margin-left: 5px;
         color: var(--carousel-header-text-color);
         text-decoration: var(--carousel-header-text-decoration);
 
@@ -21,8 +23,11 @@
     .non-selectable {
         cursor: default;
     }
-}
 
+  .carousel-btn > i {
+    color: var(--carousel-btn-color);
+  }
+}
 
 ::ng-deep .swiper-slide {
     width: auto !important;
@@ -36,7 +41,12 @@
     margin-bottom: 0;
 }
 
-h3 {
+.header {
     display: inline-block;
-    font-size: 1.2rem;
+}
+
+.title-icon {
+    color: var(--body-text-color);
+    font-size: 0.9rem;
+    cursor: pointer;
 }

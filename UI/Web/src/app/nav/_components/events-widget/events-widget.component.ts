@@ -1,7 +1,15 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Input, OnDestroy, OnInit } from '@angular/core';
-import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
-import { BehaviorSubject, Observable, of, Subject } from 'rxjs';
-import { map, shareReplay, takeUntil } from 'rxjs/operators';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  DestroyRef,
+  inject,
+  Input,
+  OnDestroy,
+  OnInit
+} from '@angular/core';
+import { NgbModal, NgbModalRef, NgbPopover } from '@ng-bootstrap/ng-bootstrap';
+import {BehaviorSubject, debounceTime, startWith} from 'rxjs';
 import { ConfirmConfig } from 'src/app/shared/confirm-dialog/_models/confirm-config';
 import { ConfirmService } from 'src/app/shared/confirm.service';
 import { UpdateNotificationModalComponent } from 'src/app/shared/update-notification/update-notification-modal.component';
@@ -13,19 +21,32 @@ import { UpdateVersionEvent } from 'src/app/_models/events/update-version-event'
 import { User } from 'src/app/_models/user';
 import { AccountService } from 'src/app/_services/account.service';
 import { EVENTS, Message, MessageHubService } from 'src/app/_services/message-hub.service';
+import {takeUntilDestroyed} from "@angular/core/rxjs-interop";
+import { SentenceCasePipe } from '../../../_pipes/sentence-case.pipe';
+import { CircularLoaderComponent } from '../../../shared/circular-loader/circular-loader.component';
+import { NgClass, NgStyle, AsyncPipe } from '@angular/common';
+import {TranslocoDirective} from "@jsverse/transloco";
+import {DefaultModalOptions} from "../../../_models/default-modal-options";
 
 @Component({
-  selector: 'app-nav-events-toggle',
-  templateUrl: './events-widget.component.html',
-  styleUrls: ['./events-widget.component.scss'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+    selector: 'app-nav-events-toggle',
+    templateUrl: './events-widget.component.html',
+    styleUrls: ['./events-widget.component.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush,
+    standalone: true,
+  imports: [NgClass, NgbPopover, NgStyle, CircularLoaderComponent, AsyncPipe, SentenceCasePipe, TranslocoDirective]
 })
 export class EventsWidgetComponent implements OnInit, OnDestroy {
-  @Input() user!: User;
+  public readonly downloadService = inject(DownloadService);
+  public readonly messageHub = inject(MessageHubService);
+  private readonly modalService = inject(NgbModal);
+  protected readonly accountService = inject(AccountService);
+  private readonly confirmService = inject(ConfirmService);
+  private readonly cdRef = inject(ChangeDetectorRef);
+  private readonly destroyRef = inject(DestroyRef);
 
-  isAdmin$: Observable<boolean> = of(false);
+  @Input({required: true}) user!: User;
 
-  private readonly onDestroy = new Subject<void>();
 
   /**
    * Progress events (Event Type: 'started', 'ended', 'updated' that have progress property)
@@ -44,30 +65,25 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
 
   private updateNotificationModalRef: NgbModalRef | null = null;
 
+  activeEventsSource = new BehaviorSubject<number>(0);
+  activeEvents$ = this.activeEventsSource.asObservable().pipe(startWith(0), takeUntilDestroyed(this.destroyRef), debounceTime(100));
   activeEvents: number = 0;
+  /**
+   * Intercepts from Single Updates to show an extra indicator to the user
+   */
+  updateAvailable: boolean = false;
 
-  debugMode: boolean = false;
+  protected readonly EVENTS = EVENTS;
 
-
-  get EVENTS() {
-    return EVENTS;
-  }
-
-  constructor(public messageHub: MessageHubService, private modalService: NgbModal, 
-    private accountService: AccountService, private confirmService: ConfirmService,
-    private readonly cdRef: ChangeDetectorRef, public downloadService: DownloadService) {
-    }
 
   ngOnDestroy(): void {
-    this.onDestroy.next();
-    this.onDestroy.complete();
     this.progressEventsSource.complete();
     this.singleUpdateSource.complete();
     this.errorSource.complete();
   }
 
   ngOnInit(): void {
-    this.messageHub.messages$.pipe(takeUntil(this.onDestroy)).subscribe(event => {
+    this.messageHub.messages$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((event: Message<NotificationProgressEvent>) => {
       if (event.event === EVENTS.NotificationProgress) {
         this.processNotificationProgressEvent(event);
       } else if (event.event === EVENTS.Error) {
@@ -75,21 +91,19 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
         values.push(event.payload as ErrorEvent);
         this.errorSource.next(values);
         this.activeEvents += 1;
+        this.activeEventsSource.next(this.activeEvents);
         this.cdRef.markForCheck();
       } else if (event.event === EVENTS.Info) {
         const values = this.infoSource.getValue();
         values.push(event.payload as InfoEvent);
         this.infoSource.next(values);
         this.activeEvents += 1;
+        this.activeEventsSource.next(this.activeEvents);
         this.cdRef.markForCheck();
+      } else if (event.event === EVENTS.UpdateAvailable) {
+        this.handleUpdateAvailableClick(event.payload);
       }
     });
-
-    this.isAdmin$ = this.accountService.currentUser$.pipe(
-      takeUntil(this.onDestroy), 
-      map(user => (user && this.accountService.hasAdminRole(user)) || false), 
-      shareReplay()
-    );
   }
 
   processNotificationProgressEvent(event: Message<NotificationProgressEvent>) {
@@ -101,10 +115,14 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
         values.push(message);
         this.singleUpdateSource.next(values);
         this.activeEvents += 1;
+        this.activeEventsSource.next(this.activeEvents);
+        if (event.payload.name === EVENTS.UpdateAvailable) {
+          this.updateAvailable = true;
+        }
         this.cdRef.markForCheck();
         break;
       case 'started':
-        // Sometimes we can receive 2 started on long running scans, so better to just treat as a merge then.
+        // Sometimes we can receive 2 started on long-running scans, so better to just treat as a merge then.
         data = this.mergeOrUpdate(this.progressEventsSource.getValue(), message);
         this.progressEventsSource.next(data);
         break;
@@ -117,6 +135,7 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
         data = data.filter(m => m.name !== message.name);
         this.progressEventsSource.next(data);
         this.activeEvents = Math.max(this.activeEvents - 1, 0);
+        this.activeEventsSource.next(this.activeEvents);
         this.cdRef.markForCheck();
         break;
       default:
@@ -130,6 +149,7 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
     if (index < 0) {
       data.push(message);
       this.activeEvents += 1;
+      this.activeEventsSource.next(this.activeEvents);
       this.cdRef.markForCheck();
     } else {
       data[index] = message;
@@ -138,10 +158,15 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
   }
 
 
-  handleUpdateAvailableClick(message: NotificationProgressEvent) {
+  handleUpdateAvailableClick(message: NotificationProgressEvent | UpdateVersionEvent) {
     if (this.updateNotificationModalRef != null) { return; }
-    this.updateNotificationModalRef = this.modalService.open(UpdateNotificationModalComponent, { scrollable: true, size: 'lg' });
-    this.updateNotificationModalRef.componentInstance.updateData = message.body as UpdateVersionEvent;
+    this.updateNotificationModalRef = this.modalService.open(UpdateNotificationModalComponent, DefaultModalOptions);
+    if (message.hasOwnProperty('body')) {
+      this.updateNotificationModalRef.componentInstance.updateData = (message as NotificationProgressEvent).body as UpdateVersionEvent;
+    } else {
+      this.updateNotificationModalRef.componentInstance.updateData = message as UpdateVersionEvent;
+    }
+
     this.updateNotificationModalRef.closed.subscribe(() => {
       this.updateNotificationModalRef = null;
     });
@@ -164,7 +189,7 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
     }
     config.header = event.title;
     config.content = event.subTitle;
-    var result = await this.confirmService.alert(event.subTitle || event.title, config);
+    const result = await this.confirmService.alert(event.subTitle || event.title, config);
     if (result) {
       this.removeErrorOrInfo(event);
     }
@@ -176,6 +201,7 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
     this.infoSource.next([]);
     this.errorSource.next([]);
     this.activeEvents -= Math.max(infoCount + errorCount, 0);
+    this.activeEventsSource.next(this.activeEvents);
     this.cdRef.markForCheck();
   }
 
@@ -187,14 +213,15 @@ export class EventsWidgetComponent implements OnInit, OnDestroy {
     let data = [];
     if (messageEvent.name === EVENTS.Info) {
       data = this.infoSource.getValue();
-      data = data.filter(m => m !== messageEvent); 
+      data = data.filter(m => m !== messageEvent);
       this.infoSource.next(data);
     } else {
       data = this.errorSource.getValue();
-      data = data.filter(m => m !== messageEvent); 
+      data = data.filter(m => m !== messageEvent);
       this.errorSource.next(data);
     }
     this.activeEvents = Math.max(this.activeEvents - 1, 0);
+    this.activeEventsSource.next(this.activeEvents);
     this.cdRef.markForCheck();
   }
 

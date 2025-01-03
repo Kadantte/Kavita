@@ -20,11 +20,13 @@ using Xunit;
 
 namespace API.Tests.Repository;
 
+#nullable enable
+
 public class SeriesRepositoryTests
 {
     private readonly IUnitOfWork _unitOfWork;
 
-    private readonly DbConnection _connection;
+    private readonly DbConnection? _connection;
     private readonly DataContext _context;
 
     private const string CacheDirectory = "C:/kavita/config/cache/";
@@ -122,6 +124,10 @@ public class SeriesRepositoryTests
                 .WithLocalizedName("Heion Sedai no Idaten-tachi")
                 .WithFormat(MangaFormat.Archive)
                 .Build())
+            .WithSeries(new SeriesBuilder("Hitomi-chan is Shy With Strangers")
+                .WithLocalizedName("Hitomi-chan wa Hitomishiri")
+                .WithFormat(MangaFormat.Archive)
+                .Build())
             .Build();
 
         _unitOfWork.LibraryRepository.Add(library);
@@ -133,6 +139,7 @@ public class SeriesRepositoryTests
     [InlineData("The Idaten Deities Know Only Peace", MangaFormat.Archive, "", "The Idaten Deities Know Only Peace")] // Matching on series name in DB
     [InlineData("Heion Sedai no Idaten-tachi", MangaFormat.Archive, "The Idaten Deities Know Only Peace", "The Idaten Deities Know Only Peace")] // Matching on localized name in DB
     [InlineData("Heion Sedai no Idaten-tachi", MangaFormat.Pdf, "", null)]
+    [InlineData("Hitomi-chan wa Hitomishiri", MangaFormat.Archive, "", "Hitomi-chan is Shy With Strangers")]
     public async Task GetFullSeriesByAnyName_Should(string seriesName, MangaFormat format, string localizedName, string? expected)
     {
         await ResetDb();
@@ -151,5 +158,7 @@ public class SeriesRepositoryTests
             Assert.Equal(expected, series.Name);
         }
     }
+
+    // TODO: GetSeriesDtoForLibraryIdV2Async Tests (On Deck)
 
 }

@@ -5,10 +5,14 @@ using System.Threading.Tasks;
 using API.Data;
 using API.DTOs;
 using API.DTOs.Statistics;
+using API.DTOs.Stats;
 using API.Entities;
 using API.Entities.Enums;
 using API.Extensions;
 using API.Extensions.QueryExtensions;
+using API.Helpers;
+using API.Services.Plus;
+using API.Services.Tasks.Scanner.Parser;
 using AutoMapper;
 using AutoMapper.QueryableExtensions;
 using Microsoft.EntityFrameworkCore;
@@ -27,11 +31,13 @@ public interface IStatisticService
     Task<IEnumerable<TopReadDto>> GetTopUsers(int days);
     Task<IEnumerable<ReadHistoryEvent>> GetReadingHistory(int userId);
     Task<IEnumerable<PagesReadOnADayCount<DateTime>>> ReadCountByDay(int userId = 0, int days = 0);
-    IEnumerable<StatCount<DayOfWeek>> GetDayBreakdown();
+    IEnumerable<StatCount<DayOfWeek>> GetDayBreakdown(int userId = 0);
     IEnumerable<StatCount<int>> GetPagesReadCountByYear(int userId = 0);
     IEnumerable<StatCount<int>> GetWordsReadCountByYear(int userId = 0);
     Task UpdateServerStatistics();
     Task<long> TimeSpentReadingForUsersAsync(IList<int> userIds, IList<int> libraryIds);
+    Task<KavitaPlusMetadataBreakdownDto> GetKavitaPlusMetadataBreakdown();
+    Task<IEnumerable<FileExtensionExportDto>> GetFilesByExtension(string fileExtension);
 }
 
 /// <summary>
@@ -54,13 +60,17 @@ public class StatisticService : IStatisticService
     public async Task<UserReadStatistics> GetUserReadStatistics(int userId, IList<int> libraryIds)
     {
         if (libraryIds.Count == 0)
+        {
             libraryIds = await _context.Library.GetUserLibraries(userId).ToListAsync();
+        }
+
 
         // Total Pages Read
         var totalPagesRead = await _context.AppUserProgresses
             .Where(p => p.AppUserId == userId)
             .Where(p => libraryIds.Contains(p.LibraryId))
-            .SumAsync(p => p.PagesRead);
+            .Select(p => (int?) p.PagesRead)
+            .SumAsync() ?? 0;
 
         var timeSpentReading = await TimeSpentReadingForUsersAsync(new List<int>() {userId}, libraryIds);
 
@@ -78,10 +88,10 @@ public class StatisticService : IStatisticService
             .CountAsync();
 
         var lastActive = await _context.AppUserProgresses
-            .OrderByDescending(p => p.LastModified)
             .Where(p => p.AppUserId == userId)
             .Select(p => p.LastModified)
-            .FirstOrDefaultAsync();
+            .DefaultIfEmpty()
+            .MaxAsync();
 
 
         // First get the total pages per library
@@ -103,15 +113,40 @@ public class StatisticService : IStatisticService
             })
             .ToListAsync();
 
-        var averageReadingTimePerWeek = _context.AppUserProgresses
+
+        // New solution. Calculate total hours then divide by number of weeks from time account was created (or min reading event) till now
+        var averageReadingTimePerWeek = await _context.AppUserProgresses
             .Where(p => p.AppUserId == userId)
             .Join(_context.Chapter, p => p.ChapterId, c => c.Id,
                 (p, c) => new
                 {
-                    AverageReadingHours = Math.Min((float) p.PagesRead / (float) c.Pages, 1.0) * ((float) c.AvgHoursToRead)
+                    // TODO: See if this can be done in the DB layer
+                    AverageReadingHours = Math.Min((float) p.PagesRead / (float) c.Pages, 1.0) *
+                                          ((float) c.AvgHoursToRead)
                 })
             .Select(x => x.AverageReadingHours)
-            .Average() * 7.0;
+            .SumAsync();
+
+        var earliestReadDate = await _context.AppUserProgresses
+            .Where(p => p.AppUserId == userId)
+            .Select(p => p.Created)
+            .DefaultIfEmpty()
+            .MinAsync();
+
+        if (earliestReadDate == DateTime.MinValue)
+        {
+            averageReadingTimePerWeek = 0;
+        }
+        else
+        {
+            var timeDifference = DateTime.Now - earliestReadDate;
+            var deltaWeeks = (int)Math.Ceiling(timeDifference.TotalDays / 7);
+
+            averageReadingTimePerWeek /= deltaWeeks;
+        }
+
+
+
 
         return new UserReadStatistics()
         {
@@ -257,7 +292,6 @@ public class StatisticService : IStatisticService
 
 
         var distinctPeople = _context.Person
-            .AsSplitQuery()
             .AsEnumerable()
             .GroupBy(sm => sm.NormalizedName)
             .Select(sm => sm.Key)
@@ -275,7 +309,7 @@ public class StatisticService : IStatisticService
             TotalPeople = distinctPeople,
             TotalSize = await _context.MangaFile.SumAsync(m => m.Bytes),
             TotalTags = await _context.Tag.CountAsync(),
-            VolumeCount = await _context.Volume.Where(v => v.Number != 0).CountAsync(),
+            VolumeCount = await _context.Volume.Where(v => Math.Abs(v.MinNumber - Parser.LooseLeafVolumeNumber) > 0.001f).CountAsync(),
             MostActiveUsers = mostActiveUsers,
             MostActiveLibraries = mostActiveLibrary,
             MostPopularSeries = mostPopularSeries,
@@ -324,7 +358,7 @@ public class StatisticService : IStatisticService
                 LibraryId = u.LibraryId,
                 ReadDate = u.LastModified,
                 ChapterId = u.ChapterId,
-                ChapterNumber = _context.Chapter.Single(c => c.Id == u.ChapterId).Number
+                ChapterNumber = _context.Chapter.Single(c => c.Id == u.ChapterId).MinNumber
             })
             .OrderByDescending(d => d.ReadDate)
             .ToListAsync();
@@ -344,10 +378,6 @@ public class StatisticService : IStatisticService
             .WhereIf(userId > 0, x => x.appUserProgresses.AppUserId == userId)
             .WhereIf(days > 0, x => x.appUserProgresses.LastModified >= DateTime.Now.AddDays(days * -1));
 
-
-        // .Where(p => p.chapter.AvgHoursToRead > 0)
-        // .SumAsync(p =>
-        //     p.chapter.AvgHoursToRead * (p.progress.PagesRead / (1.0f * p.chapter.Pages))))
 
         var results = await query.GroupBy(x => new
             {
@@ -415,11 +445,12 @@ public class StatisticService : IStatisticService
         return results.OrderBy(r => r.Value);
     }
 
-    public IEnumerable<StatCount<DayOfWeek>> GetDayBreakdown()
+    public IEnumerable<StatCount<DayOfWeek>> GetDayBreakdown(int userId)
     {
         return _context.AppUserProgresses
             .AsSplitQuery()
             .AsNoTracking()
+            .WhereIf(userId > 0, p => p.AppUserId == userId)
             .GroupBy(p => p.LastModified.DayOfWeek)
             .OrderBy(g => g.Key)
             .Select(g => new StatCount<DayOfWeek>{ Value = g.Key, Count = g.Count() })
@@ -508,16 +539,9 @@ public class StatisticService : IStatisticService
     public async Task<long> TimeSpentReadingForUsersAsync(IList<int> userIds, IList<int> libraryIds)
     {
         var query = _context.AppUserProgresses
+            .WhereIf(userIds.Any(), p => userIds.Contains(p.AppUserId))
+            .WhereIf(libraryIds.Any(), p => libraryIds.Contains(p.LibraryId))
             .AsSplitQuery();
-
-        if (userIds.Any())
-        {
-            query = query.Where(p => userIds.Contains(p.AppUserId));
-        }
-        if (libraryIds.Any())
-        {
-            query = query.Where(p => libraryIds.Contains(p.LibraryId));
-        }
 
         return (long) Math.Round(await query
             .Join(_context.Chapter,
@@ -527,6 +551,39 @@ public class StatisticService : IStatisticService
             .Where(p => p.chapter.AvgHoursToRead > 0)
             .SumAsync(p =>
                 p.chapter.AvgHoursToRead * (p.progress.PagesRead / (1.0f * p.chapter.Pages))));
+    }
+
+    public async Task<KavitaPlusMetadataBreakdownDto> GetKavitaPlusMetadataBreakdown()
+    {
+        // We need to count number of Series that have an external series record
+        // Then count how many series are blacklisted
+        // Then get total count of series that are Kavita+ eligible
+        var plusLibraries = await _context.Library
+            .Where(l => !ExternalMetadataService.NonEligibleLibraryTypes.Contains(l.Type))
+            .Select(l => l.Id)
+            .ToListAsync();
+
+        var countOfBlacklisted = await _context.SeriesBlacklist.CountAsync();
+        var totalSeries = await _context.Series.Where(s => plusLibraries.Contains(s.LibraryId)).CountAsync();
+        var seriesWithMetadata = await _context.ExternalSeriesMetadata.CountAsync();
+
+        return new KavitaPlusMetadataBreakdownDto()
+        {
+            TotalSeries = totalSeries,
+            ErroredSeries = countOfBlacklisted,
+            SeriesCompleted = seriesWithMetadata
+        };
+
+    }
+
+    public async Task<IEnumerable<FileExtensionExportDto>> GetFilesByExtension(string fileExtension)
+    {
+        var query = _context.MangaFile
+            .Where(f => f.Extension == fileExtension)
+            .ProjectTo<FileExtensionExportDto>(_mapper.ConfigurationProvider)
+            .OrderBy(f => f.FilePath);
+
+        return await query.ToListAsync();
     }
 
     public async Task<IEnumerable<TopReadDto>> GetTopUsers(int days)
@@ -551,7 +608,6 @@ public class StatisticService : IStatisticService
                     .Contains(c.Id))
             })
             .OrderByDescending(d => d.Chapters.Sum(c => c.AvgHoursToRead))
-            .Take(5)
             .ToList();
 
 
@@ -571,16 +627,17 @@ public class StatisticService : IStatisticService
             chapterLibLookup.Add(cl.ChapterId, cl.LibraryId);
         }
 
-        var user = new Dictionary<int, Dictionary<LibraryType, long>>();
+        var user = new Dictionary<int, Dictionary<LibraryType, float>>();
         foreach (var userChapter in topUsersAndReadChapters)
         {
-            if (!user.ContainsKey(userChapter.User.Id)) user.Add(userChapter.User.Id, new Dictionary<LibraryType, long>());
+            if (!user.ContainsKey(userChapter.User.Id)) user.Add(userChapter.User.Id, []);
             var libraryTimes = user[userChapter.User.Id];
 
             foreach (var chapter in userChapter.Chapters)
             {
                 var library = libraries.First(l => l.Id == chapterLibLookup[chapter.Id]);
-                if (!libraryTimes.ContainsKey(library.Type)) libraryTimes.Add(library.Type, 0L);
+                libraryTimes.TryAdd(library.Type, 0f);
+
                 var existingHours = libraryTimes[library.Type];
                 libraryTimes[library.Type] = existingHours + chapter.AvgHoursToRead;
             }
@@ -593,7 +650,8 @@ public class StatisticService : IStatisticService
             {
                 UserId = userId,
                 Username = users.First(u => u.Id == userId).UserName,
-                BooksTime = user[userId].TryGetValue(LibraryType.Book, out var bookTime) ? bookTime : 0,
+                BooksTime = user[userId].TryGetValue(LibraryType.Book, out var bookTime) ? bookTime : 0 +
+                    (user[userId].TryGetValue(LibraryType.LightNovel, out var bookTime2) ? bookTime2 : 0),
                 ComicsTime = user[userId].TryGetValue(LibraryType.Comic, out var comicTime) ? comicTime : 0,
                 MangaTime = user[userId].TryGetValue(LibraryType.Manga, out var mangaTime) ? mangaTime : 0,
             })

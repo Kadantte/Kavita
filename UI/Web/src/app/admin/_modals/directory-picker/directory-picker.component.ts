@@ -1,9 +1,13 @@
 import { Component, Input, OnInit, ViewChild } from '@angular/core';
-import { NgbActiveModal, NgbTypeahead } from '@ng-bootstrap/ng-bootstrap';
+import { NgbActiveModal, NgbTypeahead, NgbHighlight } from '@ng-bootstrap/ng-bootstrap';
 import { catchError, debounceTime, distinctUntilChanged, filter, map, merge, Observable, of, OperatorFunction, Subject, switchMap, tap } from 'rxjs';
 import { Stack } from 'src/app/shared/data-structures/stack';
 import { DirectoryDto } from 'src/app/_models/system/directory-dto';
 import { LibraryService } from '../../../_services/library.service';
+import { NgIf, NgFor, NgClass } from '@angular/common';
+import { ReactiveFormsModule, FormsModule } from '@angular/forms';
+import {TranslocoDirective} from "@jsverse/transloco";
+import {WikiLink} from "../../../_models/wiki";
 
 
 export interface DirectoryPickerResult {
@@ -11,20 +15,20 @@ export interface DirectoryPickerResult {
   folderPath: string;
 }
 
-
-
 @Component({
   selector: 'app-directory-picker',
   templateUrl: './directory-picker.component.html',
-  styleUrls: ['./directory-picker.component.scss']
+  styleUrls: ['./directory-picker.component.scss'],
+  standalone: true,
+  imports: [ReactiveFormsModule, NgbTypeahead, FormsModule, NgbHighlight, NgIf, NgFor, NgClass, TranslocoDirective]
 })
 export class DirectoryPickerComponent implements OnInit {
 
   @Input() startingFolder: string = '';
   /**
-   * Url to give more information about selecting directories. Passing nothing will suppress. 
+   * Url to give more information about selecting directories. Passing nothing will suppress.
    */
-  @Input() helpUrl: string = 'https://wiki.kavitareader.com/en/guides/first-time-setup#adding-a-library-to-kavita';
+  @Input() helpUrl: string = WikiLink.Library;
 
   currentRoot = '';
   folders: DirectoryDto[] = [];
@@ -32,7 +36,7 @@ export class DirectoryPickerComponent implements OnInit {
 
 
   path: string = '';
-  @ViewChild('instance', {static: true}) instance!: NgbTypeahead;
+  @ViewChild('instance', {static: false}) instance!: NgbTypeahead;
   focus$ = new Subject<string>();
   click$ = new Subject<string>();
   searching: boolean = false;
@@ -124,13 +128,6 @@ export class DirectoryPickerComponent implements OnInit {
     });
   }
 
-  shareFolder(fullPath: string, event: any) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    this.modal.close({success: true, folderPath: fullPath});
-  }
-
   share() {
     this.modal.close({success: true, folderPath: this.path});
   }
@@ -139,25 +136,11 @@ export class DirectoryPickerComponent implements OnInit {
     this.modal.close({success: false, folderPath: undefined});
   }
 
-  getStem(path: string): string {
-
-    const lastPath = this.routeStack.peek();
-    if (lastPath && lastPath != path) {
-      let replaced = path.replace(lastPath, '');
-      if (replaced.startsWith('/') || replaced.startsWith('\\')) {
-        replaced = replaced.substring(1, replaced.length);
-      }
-      return replaced;
-    }
-
-    return path;
-  }
-
   navigateTo(index: number) {
     while(this.routeStack.items.length - 1 > index) {
       this.routeStack.pop();
     }
-    
+
     const fullPath = this.routeStack.items.join('/');
     this.path = fullPath;
     this.loadChildren(fullPath);

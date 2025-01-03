@@ -512,6 +512,7 @@ UI/Web/dist/
 /API/config/themes/
 /API/config/stats/
 /API/config/bookmarks/
+/API/config/favicons/
 /API/config/kavita.db
 /API/config/kavita.db-shm
 /API/config/kavita.db-wal
@@ -519,17 +520,26 @@ UI/Web/dist/
 /API/config/*.db
 /API/config/*.bak
 /API/config/*.backup
+/API/config/*.csv
 /API/config/Hangfire.db
 /API/config/Hangfire-log.db
 API/config/covers/
+API/config/images/*
 API/config/stats/*
 API/config/stats/app_stats.json
 API/config/pre-metadata/
 API/config/post-metadata/
-API/config/relations-imported.csv
-API/config/relations.csv
+API/config/*.csv
 API.Tests/TestResults/
 UI/Web/.vscode/settings.json
 /API.Tests/Services/Test Data/ArchiveService/CoverImages/output/*
 UI/Web/.angular/
 BenchmarkDotNet.Artifacts
+
+
+API.Tests/Services/Test Data/ImageService/**/*_output*
+API.Tests/Services/Test Data/ImageService/**/*_baseline*
+API.Tests/Services/Test Data/ImageService/**/*.html
+
+
+API.Tests/Services/Test Data/ScannerService/ScanTests/**/*

@@ -1,137 +1,40 @@
 import { trigger, state, style, transition, animate } from '@angular/animations';
-import { DOCUMENT } from '@angular/common';
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, ContentChild, ElementRef, EventEmitter, HostListener, Inject, Input, OnDestroy, OnInit, Output, Renderer2, RendererStyleFlags2, TemplateRef, ViewChild } from '@angular/core';
-import { FormControl, FormGroup } from '@angular/forms';
-import { Observable, ReplaySubject, Subject } from 'rxjs';
-import { auditTime, filter, map, shareReplay, switchMap, take, takeUntil, tap } from 'rxjs/operators';
+import {CommonModule, DOCUMENT} from '@angular/common';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  ContentChild, DestroyRef,
+  ElementRef,
+  EventEmitter,
+  HostListener,
+  inject,
+  Inject,
+  Input,
+  OnInit,
+  Output,
+  Renderer2,
+  RendererStyleFlags2,
+  TemplateRef,
+  ViewChild
+} from '@angular/core';
+import {FormControl, FormGroup, ReactiveFormsModule} from '@angular/forms';
+import { Observable, ReplaySubject } from 'rxjs';
+import { auditTime, filter, map, shareReplay, switchMap, take, tap } from 'rxjs/operators';
 import { KEY_CODES } from 'src/app/shared/_services/utility.service';
-import { SelectionCompareFn, TypeaheadSettings } from '../_models/typeahead-settings';
+import { TypeaheadSettings } from '../_models/typeahead-settings';
+import {takeUntilDestroyed} from "@angular/core/rxjs-interop";
+import {TagBadgeComponent} from "../../shared/tag-badge/tag-badge.component";
+import {TranslocoDirective} from "@jsverse/transloco";
+import {SelectionModel} from "../_models/selection-model";
 
-
-/**
-   * SelectionModel<T> is used for keeping track of multiple selections. Simple interface with ability to toggle.
-   * @param selectedState Optional state to set selectedOptions to. If not passed, defaults to false.
-   * @param selectedOptions Optional data elements to inform the SelectionModel of. If not passed, as toggle() occur, items are tracked.
-   * @param propAccessor Optional string that points to a unique field within the T type. Used for quickly looking up.
-   */
-export class SelectionModel<T extends object> {
-  _data!: Array<{value: T, selected: boolean}>;
-  _propAccessor: string = '';
-
-  constructor(selectedState: boolean = false, selectedOptions: Array<T> = [], propAccessor: string = '') {
-    this._data = [];
-
-    if (propAccessor != undefined || propAccessor !== '') {
-      this._propAccessor = propAccessor;
-    }
-
-    selectedOptions.forEach(d => {
-      this._data.push({value: d, selected: selectedState});
-    });
-  }
-
-  /**
-   * Will toggle if the data item is selected or not. If data option is not tracked, will add it and set state to true.
-   * @param data Item to toggle
-   * @param selectedState Force the state
-   * @param compareFn An optional function to use for the lookup, else will use shallowEqual implementation
-   */
-  toggle(data: T, selectedState?: boolean, compareFn?: SelectionCompareFn<T>) {
-    let lookupMethod = this.shallowEqual;
-    if (compareFn != undefined || compareFn != null) {
-      lookupMethod = compareFn;
-    }
-
-    const dataItem = this._data.filter(d => lookupMethod(d.value, data));
-    if (dataItem.length > 0) {
-      if (selectedState != undefined) {
-        dataItem[0].selected = selectedState;
-      } else {
-        dataItem[0].selected = !dataItem[0].selected;
-      }
-    } else {
-      this._data.push({value: data, selected: (selectedState === undefined ? true : selectedState)});
-    }
-  }
-
-
-  /**
-   * Is the passed item selected
-   * @param data item to check against
-   * @param compareFn optional method to use to perform comparisons
-   * @returns boolean
-   */
-  isSelected(data: T, compareFn?: SelectionCompareFn<T>): boolean {
-    let lookupMethod = this.shallowEqual;
-    if (compareFn != undefined || compareFn != null) {
-      lookupMethod = compareFn;
-    }
-
-    const dataItem = this._data.filter(d => lookupMethod(d.value, data));
-
-    if (dataItem.length > 0) {
-      return dataItem[0].selected;
-    }
-    return false;
-  }
-
-  /**
-   *
-   * @returns If some of the items are selected, but not all
-   */
-  hasSomeSelected(): boolean {
-    const selectedCount = this._data.filter(d => d.selected).length;
-    return (selectedCount !== this._data.length && selectedCount !== 0)
-  }
-
-  /**
-   *
-   * @returns All Selected items
-   */
-  selected(): Array<T> {
-    return this._data.filter(d => d.selected).map(d => d.value);
-  }
-
-  /**
-   *
-   * @returns All Non-Selected items
-   */
-   unselected(): Array<T> {
-    return this._data.filter(d => !d.selected).map(d => d.value);
-  }
-
-  /**
-   *
-   * @returns Last element added/tracked or undefined if nothing is tracked
-   */
-  peek(): T | undefined {
-    if (this._data.length > 0) {
-      return this._data[this._data.length - 1].value;
-    }
-
-    return undefined;
-  }
-
-  shallowEqual(a: T, b: T) {
-
-    for (let key in a) {
-      if (!(key in b) || a[key] !== b[key]) {
-        return false;
-      }
-    }
-    for (let key in b) {
-      if (!(key in a)) {
-        return false;
-      }
-    }
-    return true;
-  }
-}
 
 const ANIMATION_SPEED = 200;
 
 @Component({
   selector: 'app-typeahead',
+  standalone: true,
+  imports: [CommonModule, TagBadgeComponent, ReactiveFormsModule, TranslocoDirective],
   templateUrl: './typeahead.component.html',
   styleUrls: ['./typeahead.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -148,11 +51,11 @@ const ANIMATION_SPEED = 200;
     ])
   ]
 })
-export class TypeaheadComponent implements OnInit, OnDestroy {
+export class TypeaheadComponent implements OnInit {
   /**
    * Settings for the typeahead
    */
-  @Input() settings!: TypeaheadSettings<any>;
+  @Input({required: true}) settings!: TypeaheadSettings<any>;
   /**
    * When true, will reset field to no selections. When false, will reset to saved data
    */
@@ -171,8 +74,10 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
   @Input() focus: EventEmitter<string> | undefined;
   @Output() selectedData = new EventEmitter<any[] | any>();
   @Output() newItemAdded = new EventEmitter<any[] | any>();
+  // eslint-disable-next-line @angular-eslint/no-output-on-prefix
   @Output() onUnlock = new EventEmitter<void>();
   @Output() lockedChange = new EventEmitter<boolean>();
+  private readonly destroyRef = inject(DestroyRef);
 
 
   @ViewChild('input') inputElem!: ElementRef<HTMLInputElement>;
@@ -189,23 +94,16 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
   typeaheadControl!: FormControl;
   typeaheadForm!: FormGroup;
 
-  private readonly onDestroy = new Subject<void>();
-
   constructor(private renderer2: Renderer2, @Inject(DOCUMENT) private document: Document, private readonly cdRef: ChangeDetectorRef) { }
 
-  ngOnDestroy(): void {
-    this.onDestroy.next();
-    this.onDestroy.complete();
-  }
-
   ngOnInit() {
-    this.reset.pipe(takeUntil(this.onDestroy)).subscribe((resetToEmpty: boolean) => {
+    this.reset.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((resetToEmpty: boolean) => {
       this.clearSelections(resetToEmpty);
       this.init();
     });
 
     if (this.focus) {
-      this.focus.pipe(takeUntil(this.onDestroy)).subscribe((id: string) => {
+      this.focus.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((id: string) => {
         if (this.settings.id !== id) return;
         this.onInputFocus();
       });
@@ -258,7 +156,7 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
 
         switchMap((val: string) => {
           this.isLoadingOptions = true;
-          return this.settings.fetchFn(val.trim()).pipe(takeUntil(this.onDestroy), map((items: any[]) => items.filter(item => this.filterSelected(item))));
+          return this.settings.fetchFn(val.trim()).pipe(takeUntilDestroyed(this.destroyRef), map((items: any[]) => items.filter(item => this.filterSelected(item))));
         }),
         tap((filteredOptions: any[]) => {
           this.isLoadingOptions = false;
@@ -272,7 +170,7 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
 
         }),
         shareReplay(),
-        takeUntil(this.onDestroy)
+        takeUntilDestroyed(this.destroyRef)
       );
 
 
@@ -354,6 +252,7 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
       case KEY_CODES.ESC_KEY:
         this.hasFocus = false;
         event.stopPropagation();
+        event.preventDefault();
         break;
       default:
         break;
@@ -398,7 +297,6 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
     }
 
     this.toggleSelection(opt);
-    console.log('Selected ', opt);
 
     this.resetField();
     this.onInputFocus();
@@ -411,7 +309,6 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
     const newItem = this.settings.addTransformFn(title);
     this.newItemAdded.emit(newItem);
     this.toggleSelection(newItem);
-    console.log('Selected ', newItem);
 
     this.resetField();
     this.onInputFocus();
@@ -493,13 +390,10 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
     if (!this.typeaheadControl.dirty) return; // Do we need this?
 
     // Check if this new option will interfere with any existing ones not shown
-    
+
     if (typeof this.settings.compareFnForAdd == 'function') {
-      console.log('filtered options: ', this.optionSelection.selected());
       const willDuplicateExist = this.settings.compareFnForAdd(this.optionSelection.selected(), inputText);
-      console.log('duplicate check: ', willDuplicateExist);
       if (willDuplicateExist.length > 0) {
-        console.log("can't show add, duplicates will exist");
         return;
       }
     }
@@ -507,14 +401,11 @@ export class TypeaheadComponent implements OnInit, OnDestroy {
     if (typeof this.settings.compareFn == 'function') {
       // The problem here is that compareFn can report that duplicate will exist as it does contains not match
       const matches = this.settings.compareFn(options, inputText);
-      console.log('matches for ', inputText, ': ', matches);
-      console.log('matches include input string: ', matches.includes(this.settings.addTransformFn(inputText)));
       if (matches.length > 0 && matches.includes(this.settings.addTransformFn(inputText))) {
-        console.log("can't show add, there are still ");
         return;
       }
     }
-    
+
     this.showAddItem = true;
 
     if (this.showAddItem) {

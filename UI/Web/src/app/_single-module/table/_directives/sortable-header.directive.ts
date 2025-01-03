@@ -1,4 +1,4 @@
-import { Directive, EventEmitter, Input, Output } from "@angular/core";
+import {ChangeDetectorRef, Directive, EventEmitter, inject, Input, OnInit, Output} from "@angular/core";
 
 export const compare = (v1: string | number, v2: string | number) => (v1 < v2 ? -1 : v1 > v2 ? 1 : 0);
 export type SortColumn<T> = keyof T | '';
@@ -11,13 +11,16 @@ export interface SortEvent<T> {
 }
 
 @Directive({
-	selector: 'th[sortable]',
-	host: {
-		'[class.asc]': 'direction === "asc"',
-		'[class.desc]': 'direction === "desc"',
-		'(click)': 'rotate()',
-	},
+  // eslint-disable-next-line @angular-eslint/directive-selector
+    selector: 'th[sortable]',
+    host: {
+        '[class.asc]': 'direction === "asc"',
+        '[class.desc]': 'direction === "desc"',
+        '(click)': 'rotate()',
+    },
+    standalone: true,
 })
+// eslint-disable-next-line @angular-eslint/directive-class-suffix
 export class SortableHeader<T> {
 	@Input() sortable: SortColumn<T> = '';
 	@Input() direction: SortDirection = '';

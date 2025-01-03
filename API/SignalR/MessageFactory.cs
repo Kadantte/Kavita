@@ -1,6 +1,7 @@
 ﻿using System;
 using API.DTOs.Update;
 using API.Extensions;
+using API.Services.Plus;
 
 namespace API.SignalR;
 
@@ -12,6 +13,7 @@ public static class MessageFactoryEntityTypes
     public const string Chapter = "chapter";
     public const string CollectionTag = "collection";
     public const string ReadingList = "readingList";
+    public const string Person = "person";
 }
 public static class MessageFactory
 {
@@ -40,9 +42,9 @@ public static class MessageFactory
     /// </summary>
     public const string OnlineUsers = "OnlineUsers";
     /// <summary>
-    /// When a series is added to a collection
+    /// When a Collection has been updated
     /// </summary>
-    public const string SeriesAddedToCollection = "SeriesAddedToCollection";
+    public const string CollectionUpdated = "CollectionUpdated";
     /// <summary>
     /// Event sent out during backing up the database
     /// </summary>
@@ -117,6 +119,64 @@ public static class MessageFactory
     /// When files are being emailed to a device
     /// </summary>
     public const string SendingToDevice = "SendingToDevice";
+    /// <summary>
+    /// A Scrobbling Key has expired and needs rotation
+    /// </summary>
+    public const string ScrobblingKeyExpired = "ScrobblingKeyExpired";
+    /// <summary>
+    /// Order, Visibility, etc has changed on the Dashboard. UI will refresh the layout
+    /// </summary>
+    public const string DashboardUpdate = "DashboardUpdate";
+    /// <summary>
+    /// Order, Visibility, etc has changed on the Sidenav. UI will refresh the layout
+    /// </summary>
+    public const string SideNavUpdate = "SideNavUpdate";
+    /// <summary>
+    /// A Theme was updated and UI should refresh to get the latest version
+    /// </summary>
+    public const string SiteThemeUpdated = "SiteThemeUpdated";
+    /// <summary>
+    /// A Progress event when a smart collection is synchronizing
+    /// </summary>
+    public const string SmartCollectionSync = "SmartCollectionSync";
+    /// <summary>
+    /// Chapter is removed from server
+    /// </summary>
+    public const string ChapterRemoved = "ChapterRemoved";
+    /// <summary>
+    /// Volume is removed from server
+    /// </summary>
+    public const string VolumeRemoved = "VolumeRemoved";
+
+    public static SignalRMessage DashboardUpdateEvent(int userId)
+    {
+        return new SignalRMessage()
+        {
+            Name = DashboardUpdate,
+            Title = "Dashboard Update",
+            Progress = ProgressType.None,
+            EventType = ProgressEventType.Single,
+            Body = new
+            {
+                UserId = userId
+            }
+        };
+    }
+
+    public static SignalRMessage SideNavUpdateEvent(int userId)
+    {
+        return new SignalRMessage()
+        {
+            Name = SideNavUpdate,
+            Title = "SideNav Update",
+            Progress = ProgressType.None,
+            EventType = ProgressEventType.Single,
+            Body = new
+            {
+                UserId = userId
+            }
+        };
+    }
 
 
     public static SignalRMessage ScanSeriesEvent(int libraryId, int seriesId, string seriesName)
@@ -158,6 +218,32 @@ public static class MessageFactory
                 SeriesId = seriesId,
                 SeriesName = seriesName,
                 LibraryId = libraryId
+            }
+        };
+    }
+
+    public static SignalRMessage ChapterRemovedEvent(int chapterId, int seriesId)
+    {
+        return new SignalRMessage()
+        {
+            Name = ChapterRemoved,
+            Body = new
+            {
+                SeriesId = seriesId,
+                ChapterId = chapterId
+            }
+        };
+    }
+
+    public static SignalRMessage VolumeRemovedEvent(int volumeId, int seriesId)
+    {
+        return new SignalRMessage()
+        {
+            Name = VolumeRemoved,
+            Body = new
+            {
+                SeriesId = seriesId,
+                VolumeId = volumeId
             }
         };
     }
@@ -267,17 +353,17 @@ public static class MessageFactory
         };
     }
 
-    public static SignalRMessage SeriesAddedToCollectionEvent(int tagId, int seriesId)
+
+    public static SignalRMessage CollectionUpdatedEvent(int collectionId)
     {
         return new SignalRMessage
         {
-            Name = SeriesAddedToCollection,
+            Name = CollectionUpdated,
             Progress = ProgressType.None,
             EventType = ProgressEventType.Single,
             Body = new
             {
-                TagId = tagId,
-                SeriesId = seriesId
+                TagId = collectionId,
             }
         };
     }
@@ -294,6 +380,7 @@ public static class MessageFactory
             EventType = ProgressEventType.Single,
             Body = new
             {
+                Name = Error,
                 Title = title,
                 SubTitle = subtitle,
             }
@@ -311,6 +398,7 @@ public static class MessageFactory
             EventType = ProgressEventType.Single,
             Body = new
             {
+                Name = Info,
                 Title = title,
                 SubTitle = subtitle,
             }
@@ -333,13 +421,13 @@ public static class MessageFactory
         };
     }
 
-    public static SignalRMessage DownloadProgressEvent(string username, string downloadName, float progress, string eventType = "updated")
+    public static SignalRMessage DownloadProgressEvent(string username, string downloadName, string subtitle, float progress, string eventType = "updated")
     {
         return new SignalRMessage()
         {
             Name = DownloadProgress,
-            Title = $"Downloading {downloadName}",
-            SubTitle = $"Preparing {username.SentenceCase()} the download of {downloadName}",
+            Title = $"Preparing {username.SentenceCase()} the download of {downloadName}",
+            SubTitle = subtitle,
             EventType = eventType,
             Progress = ProgressType.Determinate,
             Body = new
@@ -379,13 +467,38 @@ public static class MessageFactory
     }
 
     /// <summary>
+    /// Represents a file being scanned by Kavita for processing and grouping
+    /// </summary>
+    /// <remarks>Does not have a progress as it's unknown how many files there are. Instead sends -1 to represent indeterminate</remarks>
+    /// <param name="folderPath"></param>
+    /// <param name="libraryName"></param>
+    /// <param name="eventType"></param>
+    /// <returns></returns>
+    public static SignalRMessage SmartCollectionProgressEvent(string collectionName, string seriesName, int currentItems, int totalItems, string eventType)
+    {
+        return new SignalRMessage()
+        {
+            Name = SmartCollectionSync,
+            Title = $"Synchronizing {collectionName}",
+            SubTitle = seriesName,
+            EventType = eventType,
+            Progress = ProgressType.Determinate,
+            Body = new
+            {
+                Progress = float.Min((currentItems / (totalItems * 1.0f)), 100f),
+                EventTime = DateTime.Now
+            }
+        };
+    }
+
+    /// <summary>
     /// This informs the UI with details about what is being processed by the Scanner
     /// </summary>
     /// <param name="libraryName"></param>
     /// <param name="eventType"></param>
     /// <param name="seriesName"></param>
     /// <returns></returns>
-    public static SignalRMessage LibraryScanProgressEvent(string libraryName, string eventType, string seriesName = "")
+    public static SignalRMessage LibraryScanProgressEvent(string libraryName, string eventType, string seriesName = "", int? totalToProcess = null)
     {
         return new SignalRMessage()
         {
@@ -394,7 +507,12 @@ public static class MessageFactory
             SubTitle = seriesName,
             EventType = eventType,
             Progress = ProgressType.Indeterminate,
-            Body = null
+            Body = new
+            {
+                SeriesName = seriesName,
+                LibraryName = libraryName,
+                LeftToProcess = totalToProcess
+            }
         };
     }
 
@@ -437,10 +555,29 @@ public static class MessageFactory
         return new SignalRMessage()
         {
             Name = SiteThemeProgress,
-            Title = "Scanning Site Theme",
+            Title = "Processing Site Theme", // TODO: Localize SignalRMessage titles
             SubTitle = subtitle,
             EventType = eventType,
             Progress = ProgressType.Indeterminate,
+            Body = new
+            {
+                ThemeName = themeName,
+            }
+        };
+    }
+
+    /// <summary>
+    /// Sends an event to the UI informing of a SiteTheme update and UI needs to refresh the content
+    /// </summary>
+    /// <param name="themeName"></param>
+    /// <returns></returns>
+    public static SignalRMessage SiteThemeUpdatedEvent(string themeName)
+    {
+        return new SignalRMessage()
+        {
+            Name = SiteThemeUpdated,
+            Title = "SiteTheme Update",
+            Progress = ProgressType.None,
             Body = new
             {
                 ThemeName = themeName,
@@ -484,7 +621,7 @@ public static class MessageFactory
         return new SignalRMessage()
         {
             Name = ConvertBookmarksProgress,
-            Title = "Converting Bookmarks to WebP",
+            Title = "Converting Bookmarks",
             SubTitle = string.Empty,
             EventType = eventType,
             Progress = ProgressType.Determinate,
@@ -501,7 +638,7 @@ public static class MessageFactory
         return new SignalRMessage()
         {
             Name = ConvertCoversProgress,
-            Title = "Converting Covers to WebP",
+            Title = "Converting Covers",
             SubTitle = string.Empty,
             EventType = eventType,
             Progress = ProgressType.Determinate,
@@ -510,6 +647,18 @@ public static class MessageFactory
                 Progress = progress,
                 EventTime = DateTime.Now
             }
+        };
+    }
+
+    public static SignalRMessage ScrobblingKeyExpiredEvent(ScrobbleProvider provider)
+    {
+        return new SignalRMessage
+        {
+            Name = ScrobblingKeyExpired,
+            Title = "Scrobbling Key Expired",
+            SubTitle = provider + " expired. Please re-generate on User Account page.",
+            Progress = ProgressType.None,
+            EventType = ProgressEventType.Single,
         };
     }
 }

@@ -1,5 +1,6 @@
 ﻿using System.Linq;
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using API.Data;
 using API.SignalR.Presence;
@@ -20,13 +21,11 @@ public class EventHub : IEventHub
 {
     private readonly IHubContext<MessageHub> _messageHub;
     private readonly IPresenceTracker _presenceTracker;
-    private readonly IUnitOfWork _unitOfWork;
 
-    public EventHub(IHubContext<MessageHub> messageHub, IPresenceTracker presenceTracker, IUnitOfWork unitOfWork)
+    public EventHub(IHubContext<MessageHub> messageHub, IPresenceTracker presenceTracker)
     {
         _messageHub = messageHub;
         _presenceTracker = presenceTracker;
-        _unitOfWork = unitOfWork;
 
         // TODO: When sending a message, queue the message up and on re-connect, reply the queued messages. Queue messages expire on a rolling basis (rolling array)
     }
@@ -55,8 +54,7 @@ public class EventHub : IEventHub
     /// <returns></returns>
     public async Task SendMessageToAsync(string method, SignalRMessage message, int userId)
     {
-        var user = await _unitOfWork.UserRepository.GetUserByIdAsync(userId) ?? throw new InvalidOperationException();
-        await _messageHub.Clients.User(user.UserName!).SendAsync(method, message);
+        await _messageHub.Clients.Users(new List<string>() {userId + string.Empty}).SendAsync(method, message);
     }
 
 }

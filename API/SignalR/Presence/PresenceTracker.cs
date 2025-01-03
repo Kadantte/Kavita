@@ -1,9 +1,11 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using API.Data;
 
 namespace API.SignalR.Presence;
+#nullable enable
 
 public interface IPresenceTracker
 {
@@ -21,7 +23,6 @@ internal class ConnectionDetail
     public bool IsAdmin { get; set; }
 }
 
-// TODO: This can respond to UserRoleUpdate events to handle online users
 /// <summary>
 /// This is a singleton service for tracking what users have a SignalR connection and their difference connectionIds
 /// </summary>
@@ -56,10 +57,6 @@ public class PresenceTracker : IPresenceTracker
                 });
             }
         }
-
-        // Update the last active for the user
-        user.UpdateLastActive();
-        await _unitOfWork.CommitAsync();
     }
 
     public Task UserDisconnected(int userId, string connectionId)
@@ -83,7 +80,10 @@ public class PresenceTracker : IPresenceTracker
         string[] onlineUsers;
         lock (OnlineUsers)
         {
-            onlineUsers = OnlineUsers.OrderBy(k => k.Value.UserName).Select(k => k.Value.UserName).ToArray();
+            onlineUsers = OnlineUsers
+                .Select(k => k.Value.UserName)
+                .Order()
+                .ToArray();
         }
 
         return Task.FromResult(onlineUsers);
@@ -94,7 +94,10 @@ public class PresenceTracker : IPresenceTracker
         int[] onlineUsers;
         lock (OnlineUsers)
         {
-            onlineUsers = OnlineUsers.Where(pair => pair.Value.IsAdmin).OrderBy(k => k.Key).Select(k => k.Key).ToArray();
+            onlineUsers = OnlineUsers.Where(pair => pair.Value.IsAdmin)
+                .Select(k => k.Key)
+                .Order()
+                .ToArray();
         }
 
 

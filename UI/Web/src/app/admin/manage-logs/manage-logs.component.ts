@@ -1,8 +1,10 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { HubConnection, HubConnectionBuilder } from '@microsoft/signalr';
-import { BehaviorSubject, ReplaySubject, Subject, take } from 'rxjs';
+import { BehaviorSubject, take } from 'rxjs';
 import { AccountService } from 'src/app/_services/account.service';
 import { environment } from 'src/environments/environment';
+import { VirtualScrollerModule } from '@iharbeck/ngx-virtual-scroller';
+import { NgIf, NgFor, AsyncPipe, DatePipe } from '@angular/common';
 
 interface LogMessage {
   timestamp: string;
@@ -12,9 +14,11 @@ interface LogMessage {
 }
 
 @Component({
-  selector: 'app-manage-logs',
-  templateUrl: './manage-logs.component.html',
-  styleUrls: ['./manage-logs.component.scss']
+    selector: 'app-manage-logs',
+    templateUrl: './manage-logs.component.html',
+    styleUrls: ['./manage-logs.component.scss'],
+    standalone: true,
+    imports: [NgIf, VirtualScrollerModule, NgFor, AsyncPipe, DatePipe]
 })
 export class ManageLogsComponent implements OnInit, OnDestroy {
 
@@ -37,7 +41,7 @@ export class ManageLogsComponent implements OnInit, OnDestroy {
         .build();
 
         console.log('Starting log connection');
-  
+
       this.hubConnection
       .start()
       .catch(err => console.error(err));
@@ -45,7 +49,7 @@ export class ManageLogsComponent implements OnInit, OnDestroy {
       this.hubConnection.on('SendLogAsObject', resp => {
         const payload = resp.arguments[0] as LogMessage;
         const logMessage = {timestamp: payload.timestamp, level: payload.level, message: payload.message, exception: payload.exception};
-        // TODO: It might be better to just have a queue to show this
+        // NOTE: It might be better to just have a queue to show this
         const values = this.logsSource.getValue();
         values.push(logMessage);
         this.logsSource.next(values);
@@ -56,7 +60,7 @@ export class ManageLogsComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    // unsubscrbe from signalr connection
+    // unsubscribe from signalr connection
     if (this.hubConnection) {
       this.hubConnection.stop().catch(err => console.error(err));
       console.log('Stoping log connection');

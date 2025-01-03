@@ -13,6 +13,7 @@ using Kavita.Common;
 using Microsoft.Extensions.Logging;
 
 namespace API.Services;
+#nullable enable
 
 public interface IDeviceService
 {
@@ -41,7 +42,7 @@ public class DeviceService : IDeviceService
         {
             userWithDevices.Devices ??= new List<Device>();
             var existingDevice = userWithDevices.Devices.SingleOrDefault(d => d.Name!.Equals(dto.Name));
-            if (existingDevice != null) throw new KavitaException("A device with this name already exists");
+            if (existingDevice != null) throw new KavitaException("device-duplicate");
 
             existingDevice = new DeviceBuilder(dto.Name)
                 .WithPlatform(dto.Platform)
@@ -69,7 +70,7 @@ public class DeviceService : IDeviceService
         try
         {
             var existingDevice = userWithDevices.Devices.SingleOrDefault(d => d.Id == dto.Id);
-            if (existingDevice == null) throw new KavitaException("This device doesn't exist yet. Please create first");
+            if (existingDevice == null) throw new KavitaException("device-not-created");
 
             existingDevice.Name = dto.Name;
             existingDevice.Platform = dto.Platform;
@@ -106,17 +107,33 @@ public class DeviceService : IDeviceService
 
     public async Task<bool> SendTo(IReadOnlyList<int> chapterIds, int deviceId)
     {
+        var settings = await _unitOfWork.SettingsRepository.GetSettingsDtoAsync();
+        if (!settings.IsEmailSetupForSendToDevice())
+            throw new KavitaException("send-to-kavita-email");
+
         var device = await _unitOfWork.DeviceRepository.GetDeviceById(deviceId);
-        if (device == null) throw new KavitaException("Device doesn't exist");
+        if (device == null) throw new KavitaException("device-doesnt-exist");
 
         var files = await _unitOfWork.ChapterRepository.GetFilesForChaptersAsync(chapterIds);
         if (files.Any(f => f.Format is not (MangaFormat.Epub or MangaFormat.Pdf)) && device.Platform == DevicePlatform.Kindle)
-            throw new KavitaException("Cannot Send non Epub or Pdf to devices as not supported on Kindle");
+            throw new KavitaException("send-to-permission");
+
+        // If the size of the files is too big
+        if (files.Sum(f => f.Bytes) >= settings.SmtpConfig.SizeLimit)
+            throw new KavitaException("send-to-size-limit");
 
 
-        device.UpdateLastUsed();
-        _unitOfWork.DeviceRepository.Update(device);
-        await _unitOfWork.CommitAsync();
+        try
+        {
+            device.UpdateLastUsed();
+            _unitOfWork.DeviceRepository.Update(device);
+            await _unitOfWork.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "There was an issue updating device last used time");
+        }
+
         var success = await _emailService.SendFilesToEmail(new SendToDto()
         {
             DestinationEmail = device.EmailAddress!,

@@ -8,15 +8,17 @@ ARG TARGETPLATFORM
 #Move the output files to where they need to be
 RUN mkdir /files
 COPY _output/*.tar.gz /files/
-COPY UI/Web/dist /files/wwwroot
+COPY UI/Web/dist/browser /files/wwwroot
 COPY copy_runtime.sh /copy_runtime.sh
 RUN /copy_runtime.sh
+RUN chmod +x /Kavita/Kavita
 
 #Production image
 FROM ubuntu:focal
 
 COPY --from=copytask /Kavita /kavita
 COPY --from=copytask /files/wwwroot /kavita/wwwroot
+COPY API/config/appsettings.json /tmp/config/appsettings.json
 
 #Installs program dependencies
 RUN apt-get update \
@@ -24,12 +26,15 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 5000
 
 WORKDIR /kavita
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=3 CMD curl --fail http://localhost:5000/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=3 CMD curl -fsS http://localhost:5000/api/health || exit 1
+
+ENV DOTNET_RUNNING_IN_CONTAINER=true
 
 ENTRYPOINT [ "/bin/bash" ]
 CMD ["/entrypoint.sh"]

@@ -8,10 +8,10 @@ using Flurl.Http;
 using Kavita.Common.EnvironmentInfo;
 using Kavita.Common.Helpers;
 using MarkdownDeep;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace API.Services.Tasks;
+#nullable enable
 
 internal class GithubReleaseMetadata
 {
@@ -45,7 +45,8 @@ public interface IVersionUpdaterService
 {
     Task<UpdateNotificationDto?> CheckForUpdate();
     Task PushUpdate(UpdateNotificationDto update);
-    Task<IEnumerable<UpdateNotificationDto>> GetAllReleases();
+    Task<IList<UpdateNotificationDto>> GetAllReleases();
+    Task<int> GetNumberOfReleasesBehind();
 }
 
 public class VersionUpdaterService : IVersionUpdaterService
@@ -72,19 +73,60 @@ public class VersionUpdaterService : IVersionUpdaterService
     /// <summary>
     /// Fetches the latest release from Github
     /// </summary>
-    /// <returns>Latest update or null if current version is greater than latest update</returns>
+    /// <returns>Latest update</returns>
     public async Task<UpdateNotificationDto?> CheckForUpdate()
     {
         var update = await GetGithubRelease();
-        var dto = CreateDto(update);
-        if (dto == null) return null;
-        return new Version(dto.UpdateVersion) <= new Version(dto.CurrentVersion) ? null : dto;
+        return CreateDto(update);
     }
 
-    public async Task<IEnumerable<UpdateNotificationDto>> GetAllReleases()
+    public async Task<IList<UpdateNotificationDto>> GetAllReleases()
     {
         var updates = await GetGithubReleases();
-        return updates.Select(CreateDto).Where(d => d != null)!;
+        var updateDtos = updates.Select(CreateDto)
+            .Where(d => d != null)
+            .OrderByDescending(d => d!.PublishDate)
+            .Select(d => d!)
+            .ToList();
+
+        // Find the latest dto
+        var latestRelease = updateDtos[0]!;
+        var updateVersion = new Version(latestRelease.UpdateVersion);
+        var isNightly = BuildInfo.Version > new Version(latestRelease.UpdateVersion);
+
+        // isNightly can be true when we compare something like v0.8.1 vs v0.8.1.0
+        if (IsVersionEqualToBuildVersion(updateVersion))
+        {
+            isNightly = false;
+        }
+
+
+        latestRelease.IsOnNightlyInRelease = isNightly;
+
+        return updateDtos;
+    }
+
+    private static bool IsVersionEqualToBuildVersion(Version updateVersion)
+    {
+        return updateVersion.Revision < 0 && BuildInfo.Version.Revision == 0 &&
+               CompareWithoutRevision(BuildInfo.Version, updateVersion);
+    }
+
+    private static bool CompareWithoutRevision(Version v1, Version v2)
+    {
+        if (v1.Major != v2.Major)
+            return v1.Major == v2.Major;
+        if (v1.Minor != v2.Minor)
+            return v1.Minor == v2.Minor;
+        if (v1.Build != v2.Build)
+            return v1.Build == v2.Build;
+        return true;
+    }
+
+    public async Task<int> GetNumberOfReleasesBehind()
+    {
+        var updates = await GetAllReleases();
+        return updates.TakeWhile(update => update.UpdateVersion != update.CurrentVersion).Count();
     }
 
     private UpdateNotificationDto? CreateDto(GithubReleaseMetadata? update)
@@ -93,6 +135,7 @@ public class VersionUpdaterService : IVersionUpdaterService
         var updateVersion = new Version(update.Tag_Name.Replace("v", string.Empty));
         var currentVersion = BuildInfo.Version.ToString(4);
 
+
         return new UpdateNotificationDto()
         {
             CurrentVersion = currentVersion,
@@ -100,26 +143,23 @@ public class VersionUpdaterService : IVersionUpdaterService
             UpdateBody = _markdown.Transform(update.Body.Trim()),
             UpdateTitle = update.Name,
             UpdateUrl = update.Html_Url,
-            IsDocker = new OsInfo(Array.Empty<IOsVersionAdapter>()).IsDocker,
-            PublishDate = update.Published_At
+            IsDocker = OsInfo.IsDocker,
+            PublishDate = update.Published_At,
+            IsReleaseEqual = IsVersionEqualToBuildVersion(updateVersion),
+            IsReleaseNewer = BuildInfo.Version < updateVersion,
         };
     }
+
 
     public async Task PushUpdate(UpdateNotificationDto? update)
     {
         if (update == null) return;
 
-        var updateVersion = new Version(update.CurrentVersion);
+        var updateVersion = new Version(update.UpdateVersion);
 
         if (BuildInfo.Version < updateVersion)
         {
-            _logger.LogInformation("Server is out of date. Current: {CurrentVersion}. Available: {AvailableUpdate}", BuildInfo.Version, updateVersion);
-            await _eventHub.SendMessageAsync(MessageFactory.UpdateAvailable, MessageFactory.UpdateVersionEvent(update),
-                true);
-        }
-        else if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == Environments.Development)
-        {
-            _logger.LogInformation("Server is up to date. Current: {CurrentVersion}", BuildInfo.Version);
+            _logger.LogWarning("Server is out of date. Current: {CurrentVersion}. Available: {AvailableUpdate}", BuildInfo.Version, updateVersion);
             await _eventHub.SendMessageAsync(MessageFactory.UpdateAvailable, MessageFactory.UpdateVersionEvent(update),
                 true);
         }

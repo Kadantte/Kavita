@@ -2,6 +2,7 @@
 using API.Entities.Enums;
 
 namespace API.DTOs.ReadingLists;
+#nullable enable
 
 public class ReadingListItemDto
 {
@@ -38,4 +39,10 @@ public class ReadingListItemDto
     /// </summary>
     /// <remarks>This is only used for CDisplayEx</remarks>
     public long FileSize { get; set; }
+    /// <summary>
+    /// The chapter summary
+    /// </summary>
+    public string? Summary { get; set; }
+
+    public bool IsSpecial { get; set; }
 }

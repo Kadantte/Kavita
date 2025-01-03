@@ -1,7 +1,10 @@
 import { MangaFormat } from './manga-format';
 import { Volume } from './volume';
+import {IHasCover} from "./common/i-has-cover";
+import {IHasReadingTime} from "./common/i-has-reading-time";
+import {IHasProgress} from "./common/i-has-progress";
 
-export interface Series {
+export interface Series extends IHasCover, IHasReadingTime, IHasProgress {
     id: number;
     name: string;
     /**
@@ -27,10 +30,7 @@ export interface Series {
      * User's rating (0-5)
      */
     userRating: number;
-    /**
-     * The user's review
-     */
-    userReview: string;
+    hasUserRated: boolean;
     libraryId: number;
     /**
      * DateTime the entity was created
@@ -63,4 +63,12 @@ export interface Series {
      * Highest level folder containing this series
      */
     folderPath: string;
+    lowestFolderPath: string;
+    /**
+     * This is currently only used on Series detail page for recommendations
+     */
+    summary?: string;
+    coverImage?: string;
+    primaryColor: string;
+    secondaryColor: string;
 }

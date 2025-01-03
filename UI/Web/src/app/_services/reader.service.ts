@@ -1,6 +1,6 @@
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Injectable } from '@angular/core';
-import { Location } from '@angular/common';
+import {DestroyRef, Inject, inject, Injectable} from '@angular/core';
+import {DOCUMENT, Location} from '@angular/common';
 import { Router } from '@angular/router';
 import { environment } from 'src/environments/environment';
 import { ChapterInfo } from '../manga-reader/_models/chapter-info';
@@ -10,12 +10,20 @@ import { MangaFormat } from '../_models/manga-format';
 import { BookmarkInfo } from '../_models/manga-reader/bookmark-info';
 import { PageBookmark } from '../_models/readers/page-bookmark';
 import { ProgressBookmark } from '../_models/readers/progress-bookmark';
-import { SeriesFilter } from '../_models/metadata/series-filter';
-import { UtilityService } from '../shared/_services/utility.service';
-import { FilterUtilitiesService } from '../shared/_services/filter-utilities.service';
 import { FileDimension } from '../manga-reader/_models/file-dimension';
 import screenfull from 'screenfull';
 import { TextResonse } from '../_types/text-response';
+import { AccountService } from './account.service';
+import {takeUntilDestroyed} from "@angular/core/rxjs-interop";
+import {PersonalToC} from "../_models/readers/personal-toc";
+import {SeriesFilterV2} from "../_models/metadata/v2/series-filter-v2";
+import NoSleep from 'nosleep.js';
+import {FullProgress} from "../_models/readers/full-progress";
+import {Volume} from "../_models/volume";
+import {UtilityService} from "../shared/_services/utility.service";
+import {translate} from "@jsverse/transloco";
+import {ToastrService} from "ngx-toastr";
+
 
 export const CHAPTER_ID_DOESNT_EXIST = -1;
 export const CHAPTER_ID_NOT_FETCHED = -2;
@@ -25,14 +33,53 @@ export const CHAPTER_ID_NOT_FETCHED = -2;
 })
 export class ReaderService {
 
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly utilityService = inject(UtilityService);
+  private readonly router = inject(Router);
+  private readonly location = inject(Location);
+  private readonly accountService = inject(AccountService);
+  private readonly toastr = inject(ToastrService);
+
   baseUrl = environment.apiUrl;
+  encodedKey: string = '';
 
   // Override background color for reader and restore it onDestroy
   private originalBodyColor!: string;
 
-  constructor(private httpClient: HttpClient, private router: Router, 
-    private location: Location, private utilityService: UtilityService,
-    private filterUtilitySerivce: FilterUtilitiesService) { }
+  private noSleep = new NoSleep();
+
+  constructor(private httpClient: HttpClient, @Inject(DOCUMENT) private document: Document) {
+      this.accountService.currentUser$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(user => {
+        if (user) {
+          this.encodedKey = encodeURIComponent(user.apiKey);
+        }
+      });
+  }
+
+  enableWakeLock(element?: Element | Document) {
+    // Enable wake lock.
+    // (must be wrapped in a user input event handler e.g. a mouse or touch handler)
+
+    if (!element) element = this.document;
+
+    const enableNoSleepHandler = () => {
+      element!.removeEventListener('click', enableNoSleepHandler, false);
+      element!.removeEventListener('touchmove', enableNoSleepHandler, false);
+      element!.removeEventListener('mousemove', enableNoSleepHandler, false);
+      this.noSleep!.enable();
+    };
+
+    // Enable wake lock.
+    // (must be wrapped in a user input event handler e.g. a mouse or touch handler)
+    element.addEventListener('click', enableNoSleepHandler, false);
+    element.addEventListener('touchmove', enableNoSleepHandler, false);
+    element.addEventListener('mousemove', enableNoSleepHandler, false);
+  }
+
+  disableWakeLock() {
+    this.noSleep.disable();
+  }
+
 
   getNavigationArray(libraryId: number, seriesId: number, chapterId: number, format: MangaFormat) {
     if (format === undefined) format = MangaFormat.ARCHIVE;
@@ -47,7 +94,7 @@ export class ReaderService {
   }
 
   downloadPdf(chapterId: number) {
-    return this.baseUrl + 'reader/pdf?chapterId=' + chapterId;
+    return `${this.baseUrl}reader/pdf?chapterId=${chapterId}&apiKey=${this.encodedKey}`;
   }
 
   bookmark(seriesId: number, volumeId: number, chapterId: number, page: number) {
@@ -58,12 +105,8 @@ export class ReaderService {
     return this.httpClient.post(this.baseUrl + 'reader/unbookmark', {seriesId, volumeId, chapterId, page});
   }
 
-  getAllBookmarks(filter: SeriesFilter | undefined) {
-    let params = new HttpParams();
-    params = this.utilityService.addPaginationIfExists(params, undefined, undefined);
-    const data = this.filterUtilitySerivce.createSeriesFilter(filter);
-
-    return this.httpClient.post<PageBookmark[]>(this.baseUrl + 'reader/all-bookmarks', data);
+  getAllBookmarks(filter: SeriesFilterV2 | undefined) {
+    return this.httpClient.post<PageBookmark[]>(this.baseUrl + 'reader/all-bookmarks', filter);
   }
 
   getBookmarks(chapterId: number) {
@@ -98,11 +141,11 @@ export class ReaderService {
   }
 
   getPageUrl(chapterId: number, page: number) {
-    return this.baseUrl + 'reader/image?chapterId=' + chapterId + '&page=' + page;
+    return `${this.baseUrl}reader/image?chapterId=${chapterId}&apiKey=${this.encodedKey}&page=${page}`;
   }
 
   getThumbnailUrl(chapterId: number, page: number) {
-    return this.baseUrl + 'reader/thumbnail?chapterId=' + chapterId + '&page=' + page;
+    return `${this.baseUrl}reader/thumbnail?chapterId=${chapterId}&apiKey=${this.encodedKey}&page=${page}`;
   }
 
   getBookmarkPageUrl(seriesId: number, apiKey: string, page: number) {
@@ -119,6 +162,10 @@ export class ReaderService {
 
   saveProgress(libraryId: number, seriesId: number, volumeId: number, chapterId: number, page: number, bookScrollId: string | null = null) {
     return this.httpClient.post(this.baseUrl + 'reader/progress', {libraryId, seriesId, volumeId, chapterId, pageNum: page, bookScrollId});
+  }
+
+  getAllProgressForChapter(chapterId: number) {
+    return this.httpClient.get<Array<FullProgress>>(this.baseUrl + 'reader/all-chapter-progress?chapterId=' + chapterId);
   }
 
   markVolumeRead(seriesId: number, volumeId: number) {
@@ -263,7 +310,81 @@ export class ReaderService {
     if (readingListMode) {
       this.router.navigateByUrl('lists/' + readingListId);
     } else {
+      // TODO: back doesn't always work, it might be nice to check the pattern of the url and see if we can be smart before just going back
       this.location.back();
     }
+  }
+
+  removePersonalToc(chapterId: number, pageNumber: number, title: string) {
+    return this.httpClient.delete(this.baseUrl + `reader/ptoc?chapterId=${chapterId}&pageNum=${pageNumber}&title=${encodeURIComponent(title)}`);
+  }
+
+  getPersonalToC(chapterId: number) {
+    return this.httpClient.get<Array<PersonalToC>>(this.baseUrl + 'reader/ptoc?chapterId=' + chapterId);
+  }
+
+  createPersonalToC(libraryId: number, seriesId: number, volumeId: number, chapterId: number, pageNumber: number, title: string, bookScrollId: string | null) {
+    return this.httpClient.post(this.baseUrl + 'reader/create-ptoc', {libraryId, seriesId, volumeId, chapterId, pageNumber, title, bookScrollId});
+  }
+
+  getElementFromXPath(path: string) {
+    const node = document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    if (node?.nodeType === Node.ELEMENT_NODE) {
+      return node as Element;
+    }
+    return null;
+  }
+
+  /**
+   *
+   * @param element
+   * @param pureXPath Will ignore shortcuts like id('')
+   */
+  getXPathTo(element: any, pureXPath = false): string {
+    if (element === null) return '';
+    if (!pureXPath) {
+      if (element.id !== '') { return 'id("' + element.id + '")'; }
+      if (element === document.body) { return element.tagName; }
+    }
+
+
+    let ix = 0;
+    const siblings = element.parentNode?.childNodes || [];
+    for (let sibling of siblings) {
+      if (sibling === element) {
+        return this.getXPathTo(element.parentNode) + '/' + element.tagName + '[' + (ix + 1) + ']';
+      }
+      if (sibling.nodeType === 1 && sibling.tagName === element.tagName) {
+        ix++;
+      }
+
+    }
+    return '';
+  }
+
+  readVolume(libraryId: number, seriesId: number, volume: Volume, incognitoMode: boolean = false) {
+    if (volume.pagesRead < volume.pages && volume.pagesRead > 0) {
+      // Find the continue point chapter and load it
+      const unreadChapters = volume.chapters.filter(item => item.pagesRead < item.pages);
+      if (unreadChapters.length > 0) {
+        this.readChapter(libraryId, seriesId, unreadChapters[0], incognitoMode);
+        return;
+      }
+      this.readChapter(libraryId, seriesId, volume.chapters[0], incognitoMode);
+      return;
+    }
+
+    // Sort the chapters, then grab first if no reading progress
+    this.readChapter(libraryId, seriesId, [...volume.chapters].sort(this.utilityService.sortChapters)[0], incognitoMode);
+  }
+
+  readChapter(libraryId: number, seriesId: number, chapter: Chapter, incognitoMode: boolean = false) {
+    if (chapter.pages === 0) {
+      this.toastr.error(translate('series-detail.no-pages'));
+      return;
+    }
+
+    this.router.navigate(this.getNavigationArray(libraryId, seriesId, chapter.id, chapter.files[0].format),
+      {queryParams: {incognitoMode}});
   }
 }

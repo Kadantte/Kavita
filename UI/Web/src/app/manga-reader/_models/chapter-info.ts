@@ -1,4 +1,4 @@
-import { LibraryType } from "src/app/_models/library";
+import { LibraryType } from "src/app/_models/library/library";
 import { MangaFormat } from "src/app/_models/manga-format";
 import { FileDimension } from "./file-dimension";
 
@@ -25,4 +25,6 @@ export interface ChapterInfo {
      * This will not always be present. Depends on if asked from backend.
      */
     doublePairs?: {[key: number]: number};
+    seriesTotalPagesRead: number;
+    seriesTotalPages: number;
 }

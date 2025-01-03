@@ -9,9 +9,11 @@ using API.Entities.Enums;
 using API.Logging;
 using API.SignalR;
 using Hangfire;
+using Kavita.Common.EnvironmentInfo;
 using Microsoft.Extensions.Logging;
 
 namespace API.Services.Tasks;
+#nullable enable
 
 public interface IBackupService
 {
@@ -43,8 +45,6 @@ public class BackupService : IBackupService
         _backupFiles = new List<string>()
         {
             "appsettings.json",
-            "Hangfire.db", // This is not used atm
-            "Hangfire-log.db", // This is not used atm
             "kavita.db",
             "kavita.db-shm", // This wont always be there
             "kavita.db-wal" // This wont always be there
@@ -90,7 +90,7 @@ public class BackupService : IBackupService
         await SendProgress(0.1F, "Copying core files");
 
         var dateString = $"{DateTime.UtcNow.ToShortDateString()}_{DateTime.UtcNow.ToLongTimeString()}".Replace("/", "_").Replace(":", "_");
-        var zipPath = _directoryService.FileSystem.Path.Join(backupDirectory, $"kavita_backup_{dateString}.zip");
+        var zipPath = _directoryService.FileSystem.Path.Join(backupDirectory, $"kavita_backup_{dateString}_v{BuildInfo.Version}.zip");
 
         if (File.Exists(zipPath))
         {
@@ -104,22 +104,31 @@ public class BackupService : IBackupService
         _directoryService.ExistOrCreate(tempDirectory);
         _directoryService.ClearDirectory(tempDirectory);
 
+        await SendProgress(0.1F, "Copying config files");
         _directoryService.CopyFilesToDirectory(
-            _backupFiles.Select(file => _directoryService.FileSystem.Path.Join(_directoryService.ConfigDirectory, file)).ToList(), tempDirectory);
+            _backupFiles.Select(file => _directoryService.FileSystem.Path.Join(_directoryService.ConfigDirectory, file)), tempDirectory);
 
+        // Copy any csv's as those are used for manual migrations
+        _directoryService.CopyFilesToDirectory(
+            _directoryService.GetFilesWithCertainExtensions(_directoryService.ConfigDirectory, @"\.csv"), tempDirectory);
+
+        await SendProgress(0.2F, "Copying logs");
         CopyLogsToBackupDirectory(tempDirectory);
 
         await SendProgress(0.25F, "Copying cover images");
-
         await CopyCoverImagesToBackupDirectory(tempDirectory);
 
-        await SendProgress(0.5F, "Copying bookmarks");
+        await SendProgress(0.35F, "Copying templates images");
+        CopyTemplatesToBackupDirectory(tempDirectory);
 
+        await SendProgress(0.5F, "Copying bookmarks");
         await CopyBookmarksToBackupDirectory(tempDirectory);
 
         await SendProgress(0.75F, "Copying themes");
-
         CopyThemesToBackupDirectory(tempDirectory);
+
+        await SendProgress(0.85F, "Copying favicons");
+        CopyFaviconsToBackupDirectory(tempDirectory);
 
         try
         {
@@ -141,6 +150,16 @@ public class BackupService : IBackupService
         _directoryService.CopyFilesToDirectory(files, _directoryService.FileSystem.Path.Join(tempDirectory, "logs"));
     }
 
+    private void CopyFaviconsToBackupDirectory(string tempDirectory)
+    {
+        _directoryService.CopyDirectoryToDirectory(_directoryService.FaviconDirectory, _directoryService.FileSystem.Path.Join(tempDirectory, "favicons"));
+    }
+
+    private void CopyTemplatesToBackupDirectory(string tempDirectory)
+    {
+        _directoryService.CopyDirectoryToDirectory(_directoryService.TemplateDirectory, _directoryService.FileSystem.Path.Join(tempDirectory, "templates"));
+    }
+
     private async Task CopyCoverImagesToBackupDirectory(string tempDirectory)
     {
         var outputTempDir = Path.Join(tempDirectory, "covers");
@@ -159,6 +178,10 @@ public class BackupService : IBackupService
             var chapterImages = await _unitOfWork.ChapterRepository.GetCoverImagesForLockedChaptersAsync();
             _directoryService.CopyFilesToDirectory(
                 chapterImages.Select(s => _directoryService.FileSystem.Path.Join(_directoryService.CoverImageDirectory, s)), outputTempDir);
+
+            var volumeImages = await _unitOfWork.VolumeRepository.GetCoverImagesForLockedVolumesAsync();
+            _directoryService.CopyFilesToDirectory(
+                volumeImages.Select(s => _directoryService.FileSystem.Path.Join(_directoryService.CoverImageDirectory, s)), outputTempDir);
 
             var libraryImages = await _unitOfWork.LibraryRepository.GetAllCoverImagesAsync();
             _directoryService.CopyFilesToDirectory(

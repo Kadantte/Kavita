@@ -6,6 +6,7 @@ using API.Services.Tasks.Scanner;
 using API.Services.Tasks.Scanner.Parser;
 
 namespace API.Helpers;
+#nullable enable
 
 public static class ParserInfoHelpers
 {
@@ -39,7 +40,7 @@ public static class ParserInfoHelpers
             }
         }
 
-        if (series.Format == MangaFormat.Unknown && format != MangaFormat.Unknown)
+        if (series.Format == MangaFormat.Unknown)
         {
             return true;
         }

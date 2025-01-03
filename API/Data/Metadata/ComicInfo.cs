@@ -1,10 +1,15 @@
 ﻿using System;
+using System.Globalization;
 using System.Linq;
+using System.Threading;
 using API.Entities;
 using API.Entities.Enums;
+using API.Services;
 using Kavita.Common.Extensions;
+using Nager.ArticleNumber;
 
 namespace API.Data.Metadata;
+#nullable enable
 
 /// <summary>
 /// A representation of a ComicInfo.xml file
@@ -35,9 +40,21 @@ public class ComicInfo
     /// IETF BCP 47 Code to represent the language of the content
     /// </summary>
     public string LanguageISO { get; set; } = string.Empty;
+
+    // ReSharper disable once InconsistentNaming
+    /// <summary>
+    /// ISBN for the underlying document
+    /// </summary>
+    /// <remarks>ComicInfo.xml will actually output a GTIN (Global Trade Item Number) and it is the responsibility of the Parser to extract the ISBN. EPub will return ISBN.</remarks>
+    public string Isbn { get; set; } = string.Empty;
+    /// <summary>
+    /// This is only for deserialization and used within <see cref="ArchiveService"/>. Use <see cref="Isbn"/> for the actual value.
+    /// </summary>
+    public string GTIN { get; set; } = string.Empty;
     /// <summary>
     /// This is the link to where the data was scraped from
     /// </summary>
+    /// <remarks>This can be comma-separated</remarks>
     public string Web { get; set; } = string.Empty;
     [System.ComponentModel.DefaultValueAttribute(0)]
     public int Day { get; set; } = 0;
@@ -61,7 +78,7 @@ public class ComicInfo
     public string SeriesGroup { get; set; } = string.Empty;
 
     /// <summary>
-    ///
+    /// Can contain multiple comma separated numbers that match with StoryArcNumber
     /// </summary>
     public string StoryArc { get; set; } = string.Empty;
     /// <summary>
@@ -110,7 +127,11 @@ public class ComicInfo
     public string CoverArtist { get; set; } = string.Empty;
     public string Editor { get; set; } = string.Empty;
     public string Publisher { get; set; } = string.Empty;
+    public string Imprint { get; set; } = string.Empty;
     public string Characters { get; set; } = string.Empty;
+    public string Teams { get; set; } = string.Empty;
+    public string Locations { get; set; } = string.Empty;
+
 
     public static AgeRating ConvertAgeRatingToEnum(string value)
     {
@@ -134,9 +155,39 @@ public class ComicInfo
         info.Letterer = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Letterer);
         info.Penciller = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Penciller);
         info.Publisher = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Publisher);
+        info.Imprint = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Imprint);
         info.Characters = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Characters);
         info.Translator = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Translator);
         info.CoverArtist = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.CoverArtist);
+        info.Teams = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Teams);
+        info.Locations = Services.Tasks.Scanner.Parser.Parser.CleanAuthor(info.Locations);
+
+        // We need to convert GTIN to ISBN
+        if (!string.IsNullOrEmpty(info.GTIN))
+        {
+            // This is likely a valid ISBN
+            if (info.GTIN[0] == '0')
+            {
+                var potentialISBN = info.GTIN.Substring(1, info.GTIN.Length - 1);
+                if (ArticleNumberHelper.IsValidIsbn13(potentialISBN))
+                {
+                    info.Isbn = potentialISBN;
+                }
+            } else if (ArticleNumberHelper.IsValidIsbn10(info.GTIN) || ArticleNumberHelper.IsValidIsbn13(info.GTIN))
+            {
+                info.Isbn = info.GTIN;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(info.Number))
+        {
+            info.Number = info.Number.Trim().Replace(",", "."); // Corrective measure for non English OSes
+        }
+
+        if (!string.IsNullOrEmpty(info.Volume))
+        {
+            info.Volume = info.Volume.Trim();
+        }
     }
 
     /// <summary>
@@ -145,16 +196,24 @@ public class ComicInfo
     /// <returns></returns>
     public int CalculatedCount()
     {
-        if (!string.IsNullOrEmpty(Number) && float.Parse(Number) > 0)
+        try
         {
-            return (int) Math.Floor(float.Parse(Number));
+            if (float.TryParse(Number, CultureInfo.InvariantCulture, out var chpCount) && chpCount > 0)
+            {
+                return (int) Math.Floor(chpCount);
+            }
+
+            if (float.TryParse(Volume, CultureInfo.InvariantCulture, out var volCount) && volCount > 0)
+            {
+                return (int) Math.Floor(volCount);
+            }
         }
-        if (!string.IsNullOrEmpty(Volume) && float.Parse(Volume) > 0)
+        catch (Exception)
         {
-            return Math.Max(Count, (int) Math.Floor(float.Parse(Volume)));
+            return 0;
         }
 
-        return Count;
+        return 0;
     }
 
 

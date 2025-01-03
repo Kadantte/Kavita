@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using API.Data;
 using API.DTOs.Reader;
@@ -14,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using NetVips;
 
 namespace API.Services;
+#nullable enable
 
 public interface ICacheService
 {
@@ -32,8 +35,10 @@ public interface ICacheService
     void CleanupChapters(IEnumerable<int> chapterIds);
     void CleanupBookmarks(IEnumerable<int> seriesIds);
     string GetCachedPagePath(int chapterId, int page);
+    string GetCachePath(int chapterId);
+    string GetBookmarkCachePath(int seriesId);
     IEnumerable<string> GetCachedPages(int chapterId);
-    IEnumerable<FileDimensionDto> GetCachedFileDimensions(int chapterId);
+    IEnumerable<FileDimensionDto> GetCachedFileDimensions(string cachePath);
     string GetCachedBookmarkPagePath(int seriesId, int page);
     string GetCachedFile(Chapter chapter);
     public void ExtractChapterFiles(string extractPath, IReadOnlyList<MangaFile> files, bool extractPdfImages = false);
@@ -47,6 +52,8 @@ public class CacheService : ICacheService
     private readonly IDirectoryService _directoryService;
     private readonly IReadingItemService _readingItemService;
     private readonly IBookmarkService _bookmarkService;
+
+    private static readonly ConcurrentDictionary<int, SemaphoreSlim> ExtractLocks = new();
 
     public CacheService(ILogger<CacheService> logger, IUnitOfWork unitOfWork,
         IDirectoryService directoryService, IReadingItemService readingItemService,
@@ -66,11 +73,15 @@ public class CacheService : ICacheService
             .OrderByNatural(Path.GetFileNameWithoutExtension);
     }
 
-    public IEnumerable<FileDimensionDto> GetCachedFileDimensions(int chapterId)
+    /// <summary>
+    /// For a given path, scan all files (in reading order) and generate File Dimensions for it. Path must exist
+    /// </summary>
+    /// <param name="cachePath"></param>
+    /// <returns></returns>
+    public IEnumerable<FileDimensionDto> GetCachedFileDimensions(string cachePath)
     {
         var sw = Stopwatch.StartNew();
-        var path = GetCachePath(chapterId);
-        var files = _directoryService.GetFilesWithExtension(path, Tasks.Scanner.Parser.Parser.ImageFileExtensions)
+        var files = _directoryService.GetFilesWithExtension(cachePath, Tasks.Scanner.Parser.Parser.ImageFileExtensions)
             .OrderByNatural(Path.GetFileNameWithoutExtension)
             .ToArray();
 
@@ -94,20 +105,19 @@ public class CacheService : ICacheService
                     Height = image.Height,
                     Width = image.Width,
                     IsWide = image.Width > image.Height,
-                    FileName = file.Replace(path, string.Empty)
+                    FileName = file.Replace(cachePath, string.Empty)
                 });
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "There was an error calculating image dimensions for {ChapterId}", chapterId);
+            _logger.LogError(ex, "There was an error calculating image dimensions for {CachePath}", cachePath);
         }
         finally
         {
             Cache.MaxFiles = originalCacheSize;
         }
 
-        _logger.LogDebug("File Dimensions call for {Length} images took {Time}ms", dimensions.Count, sw.ElapsedMilliseconds);
         return dimensions;
     }
 
@@ -127,7 +137,7 @@ public class CacheService : ICacheService
         }
 
         // Since array is 0 based, we need to keep that in account (only affects last image)
-        return page == files.Length ? files.ElementAt(page - 1) : files.ElementAt(page);
+        return page == files.Length ? files[page - 1] : files[page];
     }
 
     /// <summary>
@@ -159,11 +169,19 @@ public class CacheService : ICacheService
         var chapter = await _unitOfWork.ChapterRepository.GetChapterAsync(chapterId);
         var extractPath = GetCachePath(chapterId);
 
-        if (_directoryService.Exists(extractPath)) return chapter;
-        var files = chapter?.Files.ToList();
-        ExtractChapterFiles(extractPath, files, extractPdfToImages);
+        var extractLock = ExtractLocks.GetOrAdd(chapterId, id => new SemaphoreSlim(1,1));
 
-        return  chapter;
+        await extractLock.WaitAsync();
+        try {
+            if(_directoryService.Exists(extractPath)) return chapter;
+
+            var files = chapter?.Files.ToList();
+            ExtractChapterFiles(extractPath, files, extractPdfToImages);
+        } finally {
+            extractLock.Release();
+        }
+
+        return chapter;
     }
 
     /// <summary>
@@ -184,8 +202,25 @@ public class CacheService : ICacheService
 
         if (files.Count > 0 && files[0].Format == MangaFormat.Image)
         {
-            _readingItemService.Extract(files[0].FilePath, extractPath, MangaFormat.Image, files.Count);
-            _directoryService.Flatten(extractDi.FullName);
+            // Check if all the files are Images. If so, do a directory copy, else do the normal copy
+            if (files.All(f => f.Format == MangaFormat.Image))
+            {
+                _directoryService.ExistOrCreate(extractPath);
+                _directoryService.CopyFilesToDirectory(files.Select(f => f.FilePath), extractPath);
+            }
+            else
+            {
+                foreach (var file in files)
+                {
+                    if (fileCount > 1)
+                    {
+                        extraPath = file.Id + string.Empty;
+                    }
+                    _readingItemService.Extract(file.FilePath, Path.Join(extractPath, extraPath), MangaFormat.Image, files.Count);
+                }
+                _directoryService.Flatten(extractDi.FullName);
+            }
+
         }
 
         foreach (var file in files)
@@ -259,12 +294,17 @@ public class CacheService : ICacheService
     /// </summary>
     /// <param name="chapterId"></param>
     /// <returns></returns>
-    private string GetCachePath(int chapterId)
+    public string GetCachePath(int chapterId)
     {
         return _directoryService.FileSystem.Path.GetFullPath(_directoryService.FileSystem.Path.Join(_directoryService.CacheDirectory, $"{chapterId}/"));
     }
 
-    private string GetBookmarkCachePath(int seriesId)
+    /// <summary>
+    /// Returns the cache path for a given series' bookmarks. Should be cacheDirectory/{seriesId_bookmarks}/
+    /// </summary>
+    /// <param name="seriesId"></param>
+    /// <returns></returns>
+    public string GetBookmarkCachePath(int seriesId)
     {
         return _directoryService.FileSystem.Path.GetFullPath(_directoryService.FileSystem.Path.Join(_directoryService.CacheDirectory, $"{seriesId}_bookmarks/"));
     }
@@ -281,7 +321,7 @@ public class CacheService : ICacheService
         var path = GetCachePath(chapterId);
         // NOTE: We can optimize this by extracting and renaming, so we don't need to scan for the files and can do a direct access
         var files = _directoryService.GetFilesWithExtension(path, Tasks.Scanner.Parser.Parser.ImageFileExtensions)
-            .OrderByNatural(Path.GetFileNameWithoutExtension)
+            //.OrderByNatural(Path.GetFileNameWithoutExtension) // This is already done in GetPageFromFiles
             .ToArray();
 
         return GetPageFromFiles(files, page);
@@ -335,7 +375,7 @@ public class CacheService : ICacheService
         }
 
         // Since array is 0 based, we need to keep that in account (only affects last image)
-        return pageNum >= files.Length ? files.ElementAt(Math.Min(pageNum - 1, files.Length - 1)) : files.ElementAt(pageNum);
+        return pageNum >= files.Length ? files[Math.Min(pageNum - 1, files.Length - 1)] : files[pageNum];
     }
 
 

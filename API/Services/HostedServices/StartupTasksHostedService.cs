@@ -3,10 +3,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using API.Data;
 using API.Services.Tasks.Scanner;
+using Hangfire;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 namespace API.Services.HostedServices;
+#nullable enable
 
 public class StartupTasksHostedService : IHostedService
 {
@@ -24,7 +26,6 @@ public class StartupTasksHostedService : IHostedService
         var taskScheduler = scope.ServiceProvider.GetRequiredService<ITaskScheduler>();
         await taskScheduler.ScheduleTasks();
         taskScheduler.ScheduleUpdaterTasks();
-
 
 
         try
@@ -45,7 +46,8 @@ public class StartupTasksHostedService : IHostedService
             if ((await unitOfWork.SettingsRepository.GetSettingsDtoAsync()).EnableFolderWatching)
             {
                 var libraryWatcher = scope.ServiceProvider.GetRequiredService<ILibraryWatcher>();
-                await libraryWatcher.StartWatching();
+                // Push this off for a bit for people with massive libraries, as it can take up to 45 mins and blocks the thread
+                BackgroundJob.Enqueue(() => libraryWatcher.StartWatching());
             }
         }
         catch (Exception)

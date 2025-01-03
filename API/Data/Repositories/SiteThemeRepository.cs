@@ -19,7 +19,8 @@ public interface ISiteThemeRepository
     Task<SiteThemeDto?> GetThemeDtoByName(string themeName);
     Task<SiteTheme> GetDefaultTheme();
     Task<IEnumerable<SiteTheme>> GetThemes();
-    Task<SiteTheme?> GetThemeById(int themeId);
+    Task<SiteTheme?> GetTheme(int themeId);
+    Task<bool> IsThemeInUse(int themeId);
 }
 
 public class SiteThemeRepository : ISiteThemeRepository
@@ -71,7 +72,7 @@ public class SiteThemeRepository : ISiteThemeRepository
     {
         var result =  await _context.SiteTheme
             .Where(t => t.IsDefault)
-            .SingleOrDefaultAsync();
+            .FirstOrDefaultAsync();
 
         if (result == null)
         {
@@ -89,11 +90,17 @@ public class SiteThemeRepository : ISiteThemeRepository
             .ToListAsync();
     }
 
-    public async Task<SiteTheme?> GetThemeById(int themeId)
+    public async Task<SiteTheme> GetTheme(int themeId)
     {
         return await _context.SiteTheme
             .Where(t => t.Id == themeId)
-            .SingleOrDefaultAsync();
+            .FirstOrDefaultAsync();
+    }
+
+    public async Task<bool> IsThemeInUse(int themeId)
+    {
+        return await _context.AppUserPreferences
+            .AnyAsync(p => p.Theme.Id == themeId);
     }
 
     public async Task<SiteThemeDto?> GetThemeDto(int themeId)

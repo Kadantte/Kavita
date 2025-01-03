@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using VersOne.Epub;
 
 namespace API.Services.Tasks.Metadata;
+#nullable enable
 
 public interface IWordCountAnalyzerService
 {
@@ -32,15 +33,19 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
     private readonly IEventHub _eventHub;
     private readonly ICacheHelper _cacheHelper;
     private readonly IReaderService _readerService;
+    private readonly IMediaErrorService _mediaErrorService;
+
+    private const int AverageCharactersPerWord = 5;
 
     public WordCountAnalyzerService(ILogger<WordCountAnalyzerService> logger, IUnitOfWork unitOfWork, IEventHub eventHub,
-        ICacheHelper cacheHelper, IReaderService readerService)
+        ICacheHelper cacheHelper, IReaderService readerService, IMediaErrorService mediaErrorService)
     {
         _logger = logger;
         _unitOfWork = unitOfWork;
         _eventHub = eventHub;
         _cacheHelper = cacheHelper;
         _readerService = readerService;
+        _mediaErrorService = mediaErrorService;
     }
 
 
@@ -155,10 +160,14 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
             {
                 // This compares if it's changed since a file scan only
                 var firstFile = chapter.Files.FirstOrDefault();
-                if (firstFile == null) return;
-                if (!_cacheHelper.HasFileChangedSinceLastScan(firstFile.LastFileAnalysis, forceUpdate,
+                if (firstFile == null || !_cacheHelper.HasFileChangedSinceLastScan(firstFile.LastFileAnalysis,
+                        forceUpdate,
                         firstFile))
+                {
+                    volume.WordCount += chapter.WordCount;
+                    series.WordCount += chapter.WordCount;
                     continue;
+                }
 
                 if (series.Format == MangaFormat.Epub)
                 {
@@ -172,7 +181,7 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
                         {
                             using var book = await EpubReader.OpenBookAsync(filePath, BookService.BookReaderOptions);
 
-                            var totalPages = book.Content.Html.Values;
+                            var totalPages = book.Content.Html.Local;
                             foreach (var bookPage in totalPages)
                             {
                                 var progress = Math.Max(0F,
@@ -181,7 +190,7 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
                                 await _eventHub.SendMessageAsync(MessageFactory.NotificationProgress,
                                     MessageFactory.WordCountAnalyzerProgressEvent(series.LibraryId, progress,
                                         ProgressEventType.Updated, useFileName ? filePath : series.Name));
-                                sum += await GetWordCountFromHtml(bookPage);
+                                sum += await GetWordCountFromHtml(bookPage, filePath);
                                 pageCounter++;
                             }
 
@@ -192,7 +201,7 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
                             _logger.LogError(ex, "There was an error reading an epub file for word count, series skipped");
                             await _eventHub.SendMessageAsync(MessageFactory.Error,
                                 MessageFactory.ErrorEvent("There was an issue counting words on an epub",
-                                    $"{series.Name} - {file}"));
+                                    $"{series.Name} - {file.FilePath}"));
                             return;
                         }
 
@@ -208,6 +217,7 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
                 chapter.MinHoursToRead = est.MinHours;
                 chapter.MaxHoursToRead = est.MaxHours;
                 chapter.AvgHoursToRead = est.AvgHours;
+
                 foreach (var file in chapter.Files)
                 {
                     UpdateFileAnalysis(file);
@@ -238,16 +248,23 @@ public class WordCountAnalyzerService : IWordCountAnalyzerService
     }
 
 
-    private static async Task<int> GetWordCountFromHtml(EpubContentFileRef bookFile)
+    private async Task<int> GetWordCountFromHtml(EpubLocalTextContentFileRef bookFile, string filePath)
     {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(await bookFile.ReadContentAsTextAsync());
+        try
+        {
+            var doc = new HtmlDocument();
+            doc.LoadHtml(await bookFile.ReadContentAsync());
 
-        var textNodes = doc.DocumentNode.SelectNodes("//body//text()[not(parent::script)]");
-        if (textNodes == null) return 0;
-        return textNodes
-            .Select(node => node.InnerText.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                .Where(s => char.IsLetter(s[0])))
-            .Sum(words => words.Count());
+            var textNodes = doc.DocumentNode.SelectNodes("//body//text()[not(parent::script)]");
+            return textNodes?.Sum(node => node.InnerText.Count(char.IsLetter)) / AverageCharactersPerWord ?? 0;
+        }
+        catch (EpubContentException ex)
+        {
+            _logger.LogError(ex, "Error when counting words in epub {EpubPath}", filePath);
+            await _mediaErrorService.ReportMediaIssueAsync(filePath, MediaErrorProducer.BookService,
+                $"Invalid Epub Metadata, {bookFile.FilePath} does not exist", ex.Message);
+            return 0;
+        }
     }
+
 }

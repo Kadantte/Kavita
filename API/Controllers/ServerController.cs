@@ -3,67 +3,63 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using API.Constants;
+using API.Data;
 using API.DTOs.Jobs;
+using API.DTOs.MediaErrors;
 using API.DTOs.Stats;
 using API.DTOs.Update;
+using API.Entities.Enums;
 using API.Extensions;
+using API.Helpers;
 using API.Services;
 using API.Services.Tasks;
+using EasyCaching.Core;
 using Hangfire;
 using Hangfire.Storage;
 using Kavita.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using MimeTypes;
 using TaskScheduler = API.Services.TaskScheduler;
 
 namespace API.Controllers;
 
+#nullable enable
+
 [Authorize(Policy = "RequireAdminRole")]
 public class ServerController : BaseApiController
 {
-    private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<ServerController> _logger;
     private readonly IBackupService _backupService;
     private readonly IArchiveService _archiveService;
     private readonly IVersionUpdaterService _versionUpdaterService;
     private readonly IStatsService _statsService;
     private readonly ICleanupService _cleanupService;
-    private readonly IBookmarkService _bookmarkService;
     private readonly IScannerService _scannerService;
-    private readonly IAccountService _accountService;
     private readonly ITaskScheduler _taskScheduler;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IEasyCachingProviderFactory _cachingProviderFactory;
+    private readonly ILocalizationService _localizationService;
 
-    public ServerController(IHostApplicationLifetime applicationLifetime, ILogger<ServerController> logger,
-        IBackupService backupService, IArchiveService archiveService, IVersionUpdaterService versionUpdaterService, IStatsService statsService,
-        ICleanupService cleanupService, IBookmarkService bookmarkService, IScannerService scannerService, IAccountService accountService,
-        ITaskScheduler taskScheduler)
+    public ServerController(ILogger<ServerController> logger,
+        IBackupService backupService, IArchiveService archiveService, IVersionUpdaterService versionUpdaterService,
+        IStatsService statsService, ICleanupService cleanupService, IScannerService scannerService,
+        ITaskScheduler taskScheduler, IUnitOfWork unitOfWork, IEasyCachingProviderFactory cachingProviderFactory,
+        ILocalizationService localizationService)
     {
-        _applicationLifetime = applicationLifetime;
         _logger = logger;
         _backupService = backupService;
         _archiveService = archiveService;
         _versionUpdaterService = versionUpdaterService;
         _statsService = statsService;
         _cleanupService = cleanupService;
-        _bookmarkService = bookmarkService;
         _scannerService = scannerService;
-        _accountService = accountService;
         _taskScheduler = taskScheduler;
-    }
-
-    /// <summary>
-    /// Attempts to Restart the server. Does not work, will shutdown the instance.
-    /// </summary>
-    /// <returns></returns>
-    [HttpPost("restart")]
-    public ActionResult RestartServer()
-    {
-        _logger.LogInformation("{UserName} is restarting server from admin dashboard", User.GetUsername());
-
-        _applicationLifetime.StopApplication();
-        return Ok();
+        _unitOfWork = unitOfWork;
+        _cachingProviderFactory = cachingProviderFactory;
+        _localizationService = localizationService;
     }
 
     /// <summary>
@@ -93,6 +89,19 @@ public class ServerController : BaseApiController
     }
 
     /// <summary>
+    /// Performs the nightly maintenance work on the Server. Can be heavy.
+    /// </summary>
+    /// <returns></returns>
+    [HttpPost("cleanup")]
+    public ActionResult Cleanup()
+    {
+        _logger.LogInformation("{UserName} is clearing running general cleanup from admin dashboard", User.GetUsername());
+        RecurringJob.TriggerJob(TaskScheduler.CleanupTaskId);
+
+        return Ok();
+    }
+
+    /// <summary>
     /// Performs an ad-hoc backup of the Database
     /// </summary>
     /// <returns></returns>
@@ -109,109 +118,179 @@ public class ServerController : BaseApiController
     /// </summary>
     /// <returns></returns>
     [HttpPost("analyze-files")]
-    public ActionResult AnalyzeFiles()
+    public async Task<ActionResult> AnalyzeFiles()
     {
         _logger.LogInformation("{UserName} is performing file analysis from admin dashboard", User.GetUsername());
         if (TaskScheduler.HasAlreadyEnqueuedTask(ScannerService.Name, "AnalyzeFiles",
                 Array.Empty<object>(), TaskScheduler.DefaultQueue, true))
-            return Ok("Job already running");
+            return Ok(await _localizationService.Translate(User.GetUserId(), "job-already-running"));
 
         BackgroundJob.Enqueue(() => _scannerService.AnalyzeFiles());
         return Ok();
     }
 
+
     /// <summary>
     /// Returns non-sensitive information about the current system
     /// </summary>
+    /// <remarks>This is just for the UI and is extremely lightweight</remarks>
     /// <returns></returns>
-    [HttpGet("server-info")]
-    public async Task<ActionResult<ServerInfoDto>> GetVersion()
+    [HttpGet("server-info-slim")]
+    public async Task<ActionResult<ServerInfoSlimDto>> GetSlimVersion()
     {
-        return Ok(await _statsService.GetServerInfo());
+        return Ok(await _statsService.GetServerInfoSlim());
     }
 
+
     /// <summary>
-    /// Triggers the scheduling of the convert bookmarks job. Only one job will run at a time.
+    /// Triggers the scheduling of the convert media job. This will convert all media to the target encoding (except for PNG). Only one job will run at a time.
     /// </summary>
     /// <returns></returns>
-    [HttpPost("convert-bookmarks")]
-    public ActionResult ScheduleConvertBookmarks()
+    [HttpPost("convert-media")]
+    public async Task<ActionResult> ScheduleConvertCovers()
     {
-        if (TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllBookmarkToWebP", Array.Empty<object>(),
-                TaskScheduler.DefaultQueue, true)) return Ok();
-        BackgroundJob.Enqueue(() => _bookmarkService.ConvertAllBookmarkToWebP());
+        var encoding = (await _unitOfWork.SettingsRepository.GetSettingsDtoAsync()).EncodeMediaAs;
+        if (encoding == EncodeFormat.PNG)
+        {
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "encode-as-warning"));
+        }
+
+        _taskScheduler.CovertAllCoversToEncoding();
+
         return Ok();
     }
 
     /// <summary>
-    /// Triggers the scheduling of the convert covers job. Only one job will run at a time.
+    /// Downloads all the log files via a zip
     /// </summary>
     /// <returns></returns>
-    [HttpPost("convert-covers")]
-    public ActionResult ScheduleConvertCovers()
-    {
-        if (TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllCoverToWebP", Array.Empty<object>(),
-                TaskScheduler.DefaultQueue, true)) return Ok();
-        BackgroundJob.Enqueue(() => _taskScheduler.CovertAllCoversToWebP());
-        return Ok();
-    }
-
     [HttpGet("logs")]
-    public ActionResult GetLogs()
+    public async Task<ActionResult> GetLogs()
     {
         var files = _backupService.GetLogFiles();
         try
         {
             var zipPath =  _archiveService.CreateZipForDownload(files, "logs");
-            return PhysicalFile(zipPath, "application/zip", Path.GetFileName(zipPath), true);
+            return PhysicalFile(zipPath, MimeTypeMap.GetMimeType(Path.GetExtension(zipPath)),
+                System.Web.HttpUtility.UrlEncode(Path.GetFileName(zipPath)), true);
         }
         catch (KavitaException ex)
         {
-            return BadRequest(ex.Message);
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Checks for updates and pushes an event to the UI
+    /// </summary>
+    /// <remarks>Some users have websocket issues so this is not always reliable to alert the user</remarks>
+    [HttpGet("check-for-updates")]
+    public async Task<ActionResult> CheckForAnnouncements()
+    {
+        await _taskScheduler.CheckForUpdate();
+        return Ok();
     }
 
     /// <summary>
     /// Checks for updates, if no updates that are > current version installed, returns null
     /// </summary>
     [HttpGet("check-update")]
-    public async Task<ActionResult<UpdateNotificationDto>> CheckForUpdates()
+    public async Task<ActionResult<UpdateNotificationDto?>> CheckForUpdates()
     {
         return Ok(await _versionUpdaterService.CheckForUpdate());
     }
 
+    /// <summary>
+    /// Returns how many versions out of date this install is
+    /// </summary>
+    [HttpGet("check-out-of-date")]
+    public async Task<ActionResult<int>> CheckHowOutOfDate()
+    {
+        return Ok(await _versionUpdaterService.GetNumberOfReleasesBehind());
+    }
+
+
+    /// <summary>
+    /// Pull the Changelog for Kavita from Github and display
+    /// </summary>
+    /// <returns></returns>
+    [AllowAnonymous]
     [HttpGet("changelog")]
     public async Task<ActionResult<IEnumerable<UpdateNotificationDto>>> GetChangelog()
     {
+        // Strange bug where [Authorize] doesn't work
+        if (User.GetUserId() == 0) return Unauthorized();
+
         return Ok(await _versionUpdaterService.GetAllReleases());
     }
 
     /// <summary>
-    /// Is this server accessible to the outside net
+    /// Returns a list of reoccurring jobs. Scheduled ad-hoc jobs will not be returned.
     /// </summary>
-    /// <remarks>If the instance has the HostName set, this will return true whether or not it is accessible externally</remarks>
     /// <returns></returns>
-    [HttpGet("accessible")]
-    [AllowAnonymous]
-    public async Task<ActionResult<bool>> IsServerAccessible()
-    {
-        return Ok(await _accountService.CheckIfAccessible(Request));
-    }
-
     [HttpGet("jobs")]
-    public ActionResult<IEnumerable<JobDto>> GetJobs()
+    public async Task<ActionResult<IEnumerable<JobDto>>> GetJobs()
     {
-        var recurringJobs = JobStorage.Current.GetConnection().GetRecurringJobs().Select(
-            dto =>
-                new JobDto() {
-                    Id = dto.Id,
-                    Title = dto.Id.Replace('-', ' '),
-                    Cron = dto.Cron,
-                    CreatedAt = dto.CreatedAt,
-                    LastExecution = dto.LastExecution,
-                });
+        var jobDtoTasks = JobStorage.Current.GetConnection().GetRecurringJobs().Select(async dto =>
+            new JobDto()
+            {
+                Id = dto.Id,
+                Title = await _localizationService.Translate(User.GetUserId(), dto.Id),
+                Cron = dto.Cron,
+                LastExecutionUtc = dto.LastExecution.HasValue ? new DateTime(dto.LastExecution.Value.Ticks, DateTimeKind.Utc) : null
+            });
 
-        return Ok(recurringJobs);
-
+        return Ok(await Task.WhenAll(jobDtoTasks));
     }
+
+    /// <summary>
+    /// Returns a list of issues found during scanning or reading in which files may have corruption or bad metadata (structural metadata)
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpGet("media-errors")]
+    public ActionResult<PagedList<MediaErrorDto>> GetMediaErrors()
+    {
+        return Ok(_unitOfWork.MediaErrorRepository.GetAllErrorDtosAsync());
+    }
+
+    /// <summary>
+    /// Deletes all media errors
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpPost("clear-media-alerts")]
+    public async Task<ActionResult> ClearMediaErrors()
+    {
+        await _unitOfWork.MediaErrorRepository.DeleteAll();
+        return Ok();
+    }
+
+
+    /// <summary>
+    /// Bust Kavita+ Cache
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpPost("bust-kavitaplus-cache")]
+    public async Task<ActionResult> BustReviewAndRecCache()
+    {
+        _logger.LogInformation("Busting Kavita+ Cache");
+        var provider = _cachingProviderFactory.GetCachingProvider(EasyCacheProfiles.KavitaPlusExternalSeries);
+        await provider.FlushAsync();
+        return Ok();
+    }
+
+    /// <summary>
+    /// Runs the Sync Themes task
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpPost("sync-themes")]
+    public async Task<ActionResult> SyncThemes()
+    {
+        await _taskScheduler.SyncThemes();
+        return Ok();
+    }
+
 }

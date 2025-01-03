@@ -5,6 +5,7 @@ using API.Entities;
 using Kavita.Common;
 
 namespace API.Helpers.Builders;
+#nullable enable
 
 public class AppUserBuilder : IEntityBuilder<AppUser>
 {
@@ -28,13 +29,36 @@ public class AppUserBuilder : IEntityBuilder<AppUser>
             Ratings = new List<AppUserRating>(),
             Progresses = new List<AppUserProgress>(),
             Devices = new List<Device>(),
-            Id = 0
+            Id = 0,
+            DashboardStreams = new List<AppUserDashboardStream>(),
+            SideNavStreams = new List<AppUserSideNavStream>()
         };
     }
 
-    public AppUserBuilder WithLibrary(Library library)
+    public AppUserBuilder WithLibrary(Library library, bool createSideNavStream = false)
     {
         _appUser.Libraries.Add(library);
+        if (!createSideNavStream) return this;
+
+        if (library.Id != 0 && _appUser.SideNavStreams.Any(s => s.LibraryId == library.Id)) return this;
+        _appUser.SideNavStreams.Add(new AppUserSideNavStream()
+        {
+            Name = library.Name,
+            IsProvided = false,
+            Visible = true,
+            LibraryId = library.Id,
+            StreamType = SideNavStreamType.Library,
+            Order = _appUser.SideNavStreams.Max(s => s.Order) + 1,
+        });
+
         return this;
     }
+
+
+    public AppUserBuilder WithLocale(string locale)
+    {
+        _appUser.UserPreferences.Locale = locale;
+        return this;
+    }
+
 }

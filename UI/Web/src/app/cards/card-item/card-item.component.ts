@@ -1,10 +1,20 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, EventEmitter, HostListener, Input, OnDestroy, OnInit, Output } from '@angular/core';
-import { Observable, Subject } from 'rxjs';
-import { filter, map, takeUntil } from 'rxjs/operators';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component, ContentChild, DestroyRef,
+  EventEmitter,
+  HostListener,
+  inject,
+  Input,
+  OnInit,
+  Output, TemplateRef
+} from '@angular/core';
+import { Observable } from 'rxjs';
+import { filter, map } from 'rxjs/operators';
 import { DownloadEvent, DownloadService } from 'src/app/shared/_services/download.service';
 import { UtilityService } from 'src/app/shared/_services/utility.service';
 import { Chapter } from 'src/app/_models/chapter';
-import { CollectionTag } from 'src/app/_models/collection-tag';
+import { UserCollection } from 'src/app/_models/collection-tag';
 import { UserProgressUpdateEvent } from 'src/app/_models/events/user-progress-update-event';
 import { MangaFormat } from 'src/app/_models/manga-format';
 import { PageBookmark } from 'src/app/_models/readers/page-bookmark';
@@ -19,14 +29,70 @@ import { LibraryService } from 'src/app/_services/library.service';
 import { EVENTS, MessageHubService } from 'src/app/_services/message-hub.service';
 import { ScrollService } from 'src/app/_services/scroll.service';
 import { BulkSelectionService } from '../bulk-selection.service';
+import {takeUntilDestroyed} from "@angular/core/rxjs-interop";
+import {ImageComponent} from "../../shared/image/image.component";
+import {NgbProgressbar, NgbTooltip} from "@ng-bootstrap/ng-bootstrap";
+import {DownloadIndicatorComponent} from "../download-indicator/download-indicator.component";
+import {FormsModule} from "@angular/forms";
+import {MangaFormatPipe} from "../../_pipes/manga-format.pipe";
+import {MangaFormatIconPipe} from "../../_pipes/manga-format-icon.pipe";
+import {SentenceCasePipe} from "../../_pipes/sentence-case.pipe";
+import {DecimalPipe, NgTemplateOutlet} from "@angular/common";
+import {RouterLink, RouterLinkActive} from "@angular/router";
+import {TranslocoModule} from "@jsverse/transloco";
+import {CardActionablesComponent} from "../../_single-module/card-actionables/card-actionables.component";
+import {NextExpectedChapter} from "../../_models/series-detail/next-expected-chapter";
+import {UtcToLocalTimePipe} from "../../_pipes/utc-to-local-time.pipe";
+import {SafeHtmlPipe} from "../../_pipes/safe-html.pipe";
+import {PromotedIconComponent} from "../../shared/_components/promoted-icon/promoted-icon.component";
+import {SeriesFormatComponent} from "../../shared/series-format/series-format.component";
+import {BrowsePerson} from "../../_models/person/browse-person";
+import {CompactNumberPipe} from "../../_pipes/compact-number.pipe";
+
+export type CardEntity = Series | Volume | Chapter | UserCollection | PageBookmark | RecentlyAddedItem | NextExpectedChapter | BrowsePerson;
 
 @Component({
   selector: 'app-card-item',
+  standalone: true,
+  imports: [
+    ImageComponent,
+    NgbProgressbar,
+    DownloadIndicatorComponent,
+    FormsModule,
+    NgbTooltip,
+    MangaFormatPipe,
+    MangaFormatIconPipe,
+    CardActionablesComponent,
+    SentenceCasePipe,
+    RouterLink,
+    TranslocoModule,
+    SafeHtmlPipe,
+    RouterLinkActive,
+    PromotedIconComponent,
+    SeriesFormatComponent,
+    DecimalPipe,
+    NgTemplateOutlet,
+    CompactNumberPipe
+  ],
   templateUrl: './card-item.component.html',
   styleUrls: ['./card-item.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class CardItemComponent implements OnInit, OnDestroy {
+export class CardItemComponent implements OnInit {
+
+  private readonly destroyRef = inject(DestroyRef);
+  public readonly imageService = inject(ImageService);
+  public readonly bulkSelectionService = inject(BulkSelectionService);
+  private readonly libraryService = inject(LibraryService);
+  private readonly downloadService = inject(DownloadService);
+  private readonly utilityService = inject(UtilityService);
+  private readonly messageHub = inject(MessageHubService);
+  private readonly accountService = inject(AccountService);
+  private readonly scrollService = inject(ScrollService);
+  private readonly cdRef = inject(ChangeDetectorRef);
+  private readonly actionFactoryService = inject(ActionFactoryService);
+
+  protected readonly MangaFormat = MangaFormat;
 
   /**
    * Card item url. Will internally handle error and missing covers
@@ -36,10 +102,6 @@ export class CardItemComponent implements OnInit, OnDestroy {
    * Name of the card
    */
   @Input() title = '';
-  /**
-   * Shows below the title. Defaults to not visible
-   */
-  @Input() subtitle = '';
   /**
    * Any actions to perform on the card
    */
@@ -53,13 +115,13 @@ export class CardItemComponent implements OnInit, OnDestroy {
    */
   @Input() total = 0;
   /**
-   * Supress library link
+   * Suppress library link
    */
   @Input() suppressLibraryLink = false;
   /**
    * This is the entity we are representing. It will be returned if an action is executed.
    */
-  @Input() entity!: Series | Volume | Chapter | CollectionTag | PageBookmark | RecentlyAddedItem;
+  @Input({required: true}) entity!: CardEntity;
   /**
    * If the entity is selected or not.
    */
@@ -69,7 +131,7 @@ export class CardItemComponent implements OnInit, OnDestroy {
    */
   @Input() allowSelection: boolean = false;
   /**
-   * This will suppress the cannot read archive warning when total pages is 0
+   * This will suppress the "cannot read archive warning" when total pages is 0
    */
   @Input() suppressArchiveWarning: boolean = false;
   /**
@@ -77,9 +139,25 @@ export class CardItemComponent implements OnInit, OnDestroy {
    */
   @Input() count: number = 0;
   /**
-   * Additional information to show on the overlay area. Will always render.
+   * Show a read button. Emits on (readClicked)
    */
-  @Input() overlayInformation: string = '';
+  @Input() showReadButton: boolean = false;
+  /**
+   * If overlay is enabled, should the text be centered or not
+   */
+  @Input() centerOverlay = false;
+  /**
+   * Will generate a button to instantly read
+   */
+  @Input() hasReadButton = false;
+  /**
+   * A method that if defined will return the url
+   */
+  @Input() linkUrl?: string;
+  /**
+   * Show the format of the series
+   */
+  @Input() showFormat: boolean = true;
   /**
    * Event emitted when item is clicked
    */
@@ -88,6 +166,8 @@ export class CardItemComponent implements OnInit, OnDestroy {
    * When the card is selected.
    */
   @Output() selection = new EventEmitter<boolean>();
+  @Output() readClicked = new EventEmitter<CardEntity>();
+  @ContentChild('subtitle') subtitleTemplate!: TemplateRef<any>;
   /**
    * Library name item belongs to
    */
@@ -116,19 +196,6 @@ export class CardItemComponent implements OnInit, OnDestroy {
 
   private user: User | undefined;
 
-  get MangaFormat(): typeof MangaFormat {
-    return MangaFormat;
-  }
-
-  private readonly onDestroy = new Subject<void>();
-
-  constructor(public imageService: ImageService, private libraryService: LibraryService,
-    public utilityService: UtilityService, private downloadService: DownloadService,
-    public bulkSelectionService: BulkSelectionService,
-    private messageHub: MessageHubService, private accountService: AccountService, 
-    private scrollService: ScrollService, private readonly cdRef: ChangeDetectorRef,
-    private actionFactoryService: ActionFactoryService) {}
-
   ngOnInit(): void {
 
     if (this.entity.hasOwnProperty('promoted') && this.entity.hasOwnProperty('title')) {
@@ -136,14 +203,14 @@ export class CardItemComponent implements OnInit, OnDestroy {
       this.cdRef.markForCheck();
     }
 
-    if (this.suppressLibraryLink === false) {
+    if (!this.suppressLibraryLink) {
       if (this.entity !== undefined && this.entity.hasOwnProperty('libraryId')) {
         this.libraryId = (this.entity as Series).libraryId;
         this.cdRef.markForCheck();
       }
 
       if (this.libraryId !== undefined && this.libraryId > 0) {
-        this.libraryService.getLibraryName(this.libraryId).pipe(takeUntil(this.onDestroy)).subscribe(name => {
+        this.libraryService.getLibraryName(this.libraryId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(name => {
           this.libraryName = name;
           this.cdRef.markForCheck();
         });
@@ -152,13 +219,14 @@ export class CardItemComponent implements OnInit, OnDestroy {
     this.format = (this.entity as Series).format;
 
     if (this.utilityService.isChapter(this.entity)) {
-      const chapterTitle = this.utilityService.asChapter(this.entity).titleName;
+      const chapter = this.utilityService.asChapter(this.entity);
+      const chapterTitle = chapter.titleName;
       if (chapterTitle === '' || chapterTitle === null || chapterTitle === undefined) {
-        const volumeTitle = this.utilityService.asChapter(this.entity).volumeTitle
+        const volumeTitle = chapter.volumeTitle
         if (volumeTitle === '' || volumeTitle === null || volumeTitle === undefined) {
           this.tooltipTitle = (this.title).trim();
         } else {
-          this.tooltipTitle = (this.utilityService.asChapter(this.entity).volumeTitle + ' ' + this.title).trim();
+          this.tooltipTitle = (volumeTitle + ' ' + this.title).trim();
         }
       } else {
         this.tooltipTitle = chapterTitle;
@@ -173,21 +241,42 @@ export class CardItemComponent implements OnInit, OnDestroy {
       }
     } else if (this.utilityService.isSeries(this.entity)) {
       this.tooltipTitle = this.title || (this.utilityService.asSeries(this.entity).name);
+    } else if (this.entity.hasOwnProperty('expectedDate')) {
+      this.suppressArchiveWarning = true;
+      this.imageUrl = '';
+      const nextDate = (this.entity as NextExpectedChapter);
+
+      const tokens = nextDate.title.split(':');
+      // this.overlayInformation = `
+      //         <i class="fa-regular fa-clock mb-2" style="font-size: 26px" aria-hidden="true"></i>
+      //         <div>${tokens[0]}</div><div>${tokens[1]}</div>`;
+      // // todo: figure out where this caller is
+      this.centerOverlay = true;
+
+      if (nextDate.expectedDate) {
+        const utcPipe = new UtcToLocalTimePipe();
+        this.title = '~ ' + utcPipe.transform(nextDate.expectedDate, 'shortDate');
+      }
+
+      this.cdRef.markForCheck();
+    } else {
+      this.tooltipTitle = this.title;
     }
 
+
     this.filterSendTo();
-    this.accountService.currentUser$.pipe(takeUntil(this.onDestroy)).subscribe(user => {
+    this.accountService.currentUser$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(user => {
       this.user = user;
     });
 
     this.messageHub.messages$.pipe(filter(event => event.event === EVENTS.UserProgressUpdate),
-    map(evt => evt.payload as UserProgressUpdateEvent), takeUntil(this.onDestroy)).subscribe(updateEvent => {
+    map(evt => evt.payload as UserProgressUpdateEvent), takeUntilDestroyed(this.destroyRef)).subscribe(updateEvent => {
       if (this.user === undefined || this.user.username !== updateEvent.username) return;
       if (this.utilityService.isChapter(this.entity) && updateEvent.chapterId !== this.entity.id) return;
       if (this.utilityService.isVolume(this.entity) && updateEvent.volumeId !== this.entity.id) return;
       if (this.utilityService.isSeries(this.entity) && updateEvent.seriesId !== this.entity.id) return;
 
-      // For volume or Series, we can't just take the event 
+      // For volume or Series, we can't just take the event
       if (this.utilityService.isChapter(this.entity)) {
         const c = this.utilityService.asChapter(this.entity);
         c.pagesRead = updateEvent.pagesRead;
@@ -212,21 +301,11 @@ export class CardItemComponent implements OnInit, OnDestroy {
       this.cdRef.detectChanges();
     });
 
-    this.download$ = this.downloadService.activeDownloads$.pipe(takeUntil(this.onDestroy), map((events) => {
-      if(this.utilityService.isSeries(this.entity)) return events.find(e => e.entityType === 'series' && e.subTitle === this.downloadService.downloadSubtitle('series', (this.entity as Series))) || null;
-      if(this.utilityService.isVolume(this.entity)) return events.find(e => e.entityType === 'volume' && e.subTitle === this.downloadService.downloadSubtitle('volume', (this.entity as Volume))) || null;
-      if(this.utilityService.isChapter(this.entity)) return events.find(e => e.entityType === 'chapter' && e.subTitle === this.downloadService.downloadSubtitle('chapter', (this.entity as Chapter))) || null;
-      // Is PageBookmark[]
-      if(this.entity.hasOwnProperty('length')) return events.find(e => e.entityType === 'bookmark' && e.subTitle === this.downloadService.downloadSubtitle('bookmark', [(this.entity as PageBookmark)])) || null;
-      return null;
+    this.download$ = this.downloadService.activeDownloads$.pipe(takeUntilDestroyed(this.destroyRef), map((events) => {
+      return this.downloadService.mapToEntityType(events, this.entity);
     }));
-
   }
 
-  ngOnDestroy() {
-    this.onDestroy.next();
-    this.onDestroy.complete();
-  }
 
   @HostListener('touchmove', ['$event'])
   onTouchMove(event: TouchEvent) {
@@ -296,7 +375,7 @@ export class CardItemComponent implements OnInit, OnDestroy {
 
 
   isPromoted() {
-    const tag = this.entity as CollectionTag;
+    const tag = this.entity as UserCollection;
     return tag.hasOwnProperty('promoted') && tag.promoted;
   }
 
@@ -323,5 +402,17 @@ export class CardItemComponent implements OnInit, OnDestroy {
       //   this.actions = this.actions.filter(a => a.title !== 'Send To');
       // }
     }
+
+    // this.actions = this.actions.filter(a => {
+    //   if (!a.isAllowed) return true;
+    //   return a.isAllowed(a, this.entity);
+    // });
+  }
+
+  clickRead(event: any) {
+    event.stopPropagation();
+    if (this.bulkSelectionService.hasSelections()) return;
+
+    this.readClicked.emit(this.entity);
   }
 }

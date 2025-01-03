@@ -1,32 +1,26 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, OnDestroy, Output } from '@angular/core';
-import { Subject } from 'rxjs';
+import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 import { BookChapterItem } from '../../_models/book-chapter-item';
+import { NgIf, NgFor } from '@angular/common';
+import {TranslocoDirective} from "@jsverse/transloco";
 
 @Component({
-  selector: 'app-table-of-contents',
-  templateUrl: './table-of-contents.component.html',
-  styleUrls: ['./table-of-contents.component.scss'],
-  changeDetection: ChangeDetectionStrategy.Default
+    selector: 'app-table-of-contents',
+    templateUrl: './table-of-contents.component.html',
+    styleUrls: ['./table-of-contents.component.scss'],
+    changeDetection: ChangeDetectionStrategy.Default,
+    standalone: true,
+  imports: [NgIf, NgFor, TranslocoDirective]
 })
-export class TableOfContentsComponent implements OnDestroy {
+export class TableOfContentsComponent  {
 
-  @Input() chapterId!: number;
-  @Input() pageNum!: number;
-  @Input() currentPageAnchor!: string;
+  @Input({required: true}) chapterId!: number;
+  @Input({required: true}) pageNum!: number;
+  @Input({required: true}) currentPageAnchor!: string;
   @Input() chapters:Array<BookChapterItem> = [];
 
   @Output() loadChapter: EventEmitter<{pageNum: number, part: string}> = new EventEmitter();
 
-  private onDestroy: Subject<void> = new Subject();
-
-  pageAnchors: {[n: string]: number } = {};
-
   constructor() {}
-
-  ngOnDestroy(): void {
-      this.onDestroy.next();
-      this.onDestroy.complete();
-  }
 
   cleanIdSelector(id: string) {
     const tokens = id.split('/');

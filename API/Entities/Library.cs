@@ -5,11 +5,13 @@ using API.Entities.Interfaces;
 
 namespace API.Entities;
 
-public class Library : IEntityDate
+public class Library : IEntityDate, IHasCoverImage
 {
     public int Id { get; set; }
     public required string Name { get; set; }
     public string? CoverImage { get; set; }
+    public string PrimaryColor { get; set; }
+    public string SecondaryColor { get; set; }
     public LibraryType Type { get; set; }
     /// <summary>
     /// If Folder Watching is enabled for this library
@@ -28,9 +30,20 @@ public class Library : IEntityDate
     /// </summary>
     public bool IncludeInSearch { get; set; } = true;
     /// <summary>
-    /// Should this library create and manage collections from Metadata
+    /// Should this library create collections from Metadata
     /// </summary>
     public bool ManageCollections { get; set; } = true;
+    /// <summary>
+    /// Should this library create reading lists from Metadata
+    /// </summary>
+    public bool ManageReadingLists { get; set; } = true;
+    /// <summary>
+    /// Should this library allow Scrobble events to emit from it
+    /// </summary>
+    /// <remarks>Scrobbling requires a valid LicenseKey</remarks>
+    public bool AllowScrobbling { get; set; } = true;
+
+
     public DateTime Created { get; set; }
     public DateTime LastModified { get; set; }
     public DateTime CreatedUtc { get; set; }
@@ -44,6 +57,8 @@ public class Library : IEntityDate
     public ICollection<FolderPath> Folders { get; set; } = null!;
     public ICollection<AppUser> AppUsers { get; set; } = null!;
     public ICollection<Series> Series { get; set; } = null!;
+    public ICollection<LibraryFileTypeGroup> LibraryFileTypes { get; set; } = new List<LibraryFileTypeGroup>();
+    public ICollection<LibraryExcludePattern> LibraryExcludePatterns { get; set; } = new List<LibraryExcludePattern>();
 
     public void UpdateLastModified()
     {
@@ -61,5 +76,11 @@ public class Library : IEntityDate
         {
             LastScanned = (DateTime) time;
         }
+    }
+
+    public void ResetColorScape()
+    {
+        PrimaryColor = string.Empty;
+        SecondaryColor = string.Empty;
     }
 }

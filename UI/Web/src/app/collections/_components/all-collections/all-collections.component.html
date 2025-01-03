@@ -1,22 +1,40 @@
-<app-side-nav-companion-bar [hasFilter]="false" (filterOpen)="filterOpen.emit($event)">
-    <h2 title>
-        Collections
-    </h2>
-    <h6 subtitle>{{collections.length | number}} Items</h6>
-</app-side-nav-companion-bar>
-<app-card-detail-layout
-    [isLoading]="isLoading"
-    [items]="collections"
-    [filterOpen]="filterOpen"
-    [jumpBarKeys]="jumpbarKeys"
-    [trackByIdentity]="trackByIdentity"
-    >
-        <ng-template #cardItem let-item let-position="idx">
-            <app-card-item [title]="item.title" [entity]="item" [actions]="collectionTagActions" [imageUrl]="imageSerivce.getCollectionCoverImage(item.id)" (clicked)="loadCollection(item)"></app-card-item>
-        </ng-template>
+<div class="main-container container-fluid">
+  <ng-container *transloco="let t; read: 'all-collections'">
+    <app-side-nav-companion-bar [hasFilter]="false" (filterOpen)="filterOpen.emit($event)">
+      <h4 title>{{t('title')}}</h4>
+      <h5 subtitle>{{t('item-count', {num: collections.length | number})}}</h5>
+    </app-side-nav-companion-bar>
+    <app-bulk-operations [actionCallback]="bulkActionCallback"></app-bulk-operations>
 
-        <ng-template #noData>
-            There are no collections.
-            <ng-container *ngIf="isAdmin$ | async"> Try creating <a href="https://wiki.kavitareader.com/en/guides/get-started-using-your-library/collections" rel="noopener noreferrer" target="_blank">one&nbsp;<i class="fa fa-external-link-alt" aria-hidden="true"></i></a></ng-container>
-        </ng-template>
-</app-card-detail-layout>
+    <app-card-detail-layout
+      [isLoading]="isLoading"
+      [items]="collections"
+      [filterOpen]="filterOpen"
+      [jumpBarKeys]="jumpbarKeys"
+      [trackByIdentity]="trackByIdentity"
+    >
+      <ng-template #cardItem let-item let-position="idx">
+        <app-card-item [title]="item.title" [entity]="item" [actions]="collectionTagActions"
+                       [imageUrl]="imageService.getCollectionCoverImage(item.id)"
+                       [linkUrl]="'/collections/' + item.id"
+                       [count]="item.itemCount"
+                       (clicked)="loadCollection(item)"
+                       (selection)="bulkSelectionService.handleCardSelection('collection', position, collections.length, $event)"
+                       [selected]="bulkSelectionService.isCardSelected('collection', position)" [allowSelection]="true" [showFormat]="false">
+
+          <ng-template #subtitle>
+            <app-collection-owner [collection]="item"></app-collection-owner>
+          </ng-template>
+        </app-card-item>
+      </ng-template>
+
+      <ng-template #noData>
+        {{t('no-data')}}
+        @if(accountService.isAdmin$ | async) {
+          {{t('create-one-part-1')}} <a [href]="WikiLink.Collections" rel="noopener noreferrer" target="_blank">{{t('create-one-part-2')}}<i class="fa fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+        }
+      </ng-template>
+    </app-card-detail-layout>
+
+  </ng-container>
+</div>

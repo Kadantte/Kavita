@@ -1,4 +1,5 @@
 ﻿namespace API.Helpers;
+#nullable enable
 
 public class UserParams
 {
@@ -14,4 +15,10 @@ public class UserParams
         get => _pageSize;
         init => _pageSize = (value == 0) ? MaxPageSize : value;
     }
+
+    public static readonly UserParams Default = new()
+    {
+        PageSize = 20,
+        PageNumber = 1
+    };
 }

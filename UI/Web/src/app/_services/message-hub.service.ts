@@ -1,7 +1,5 @@
 import { Injectable } from '@angular/core';
-import { Router } from '@angular/router';
 import { HubConnection, HubConnectionBuilder } from '@microsoft/signalr';
-import { ToastrService } from 'ngx-toastr';
 import { BehaviorSubject, ReplaySubject } from 'rxjs';
 import { environment } from 'src/environments/environment';
 import { LibraryModifiedEvent } from '../_models/events/library-modified-event';
@@ -9,15 +7,23 @@ import { NotificationProgressEvent } from '../_models/events/notification-progre
 import { ThemeProgressEvent } from '../_models/events/theme-progress-event';
 import { UserUpdateEvent } from '../_models/events/user-update-event';
 import { User } from '../_models/user';
+import {DashboardUpdateEvent} from "../_models/events/dashboard-update-event";
+import {SideNavUpdateEvent} from "../_models/events/sidenav-update-event";
+import {SiteThemeUpdatedEvent} from "../_models/events/site-theme-updated-event";
 
 export enum EVENTS {
   UpdateAvailable = 'UpdateAvailable',
   ScanSeries = 'ScanSeries',
   SeriesAdded = 'SeriesAdded',
   SeriesRemoved = 'SeriesRemoved',
+  VolumeRemoved = 'VolumeRemoved',
+  ChapterRemoved = 'ChapterRemoved',
   ScanLibraryProgress = 'ScanLibraryProgress',
   OnlineUsers = 'OnlineUsers',
-  SeriesAddedToCollection = 'SeriesAddedToCollection',
+  /**
+   * When a Collection has been updated
+   */
+  CollectionUpdated = 'CollectionUpdated',
   /**
    * A generic error that occurs during operations on the server
    */
@@ -40,6 +46,10 @@ export enum EVENTS {
    * A subtype of NotificationProgress that represents the underlying file being processed during a scan
    */
   FileScanProgress = 'FileScanProgress',
+  /**
+   * A subtype of NotificationProgress that represents a single series being processed (into the DB)
+   */
+  ScanProgress = 'ScanProgress',
   /**
    * A custom user site theme is added or removed during a scan
    */
@@ -80,6 +90,26 @@ export enum EVENTS {
     * A user is sending files to their device
     */
   SendingToDevice = 'SendingToDevice',
+  /**
+   * A scrobbling token has expired
+   */
+  ScrobblingKeyExpired = 'ScrobblingKeyExpired',
+  /**
+   * User's dashboard needs to be re-rendered
+   */
+  DashboardUpdate = 'DashboardUpdate',
+  /**
+   * User's sidenav needs to be re-rendered
+   */
+  SideNavUpdate = 'SideNavUpdate',
+  /**
+   * A Theme was updated and UI should refresh to get the latest version
+   */
+  SiteThemeUpdated = 'SiteThemeUpdated',
+  /**
+   * A Progress event when a smart collection is synchronizing
+   */
+  SmartCollectionSync = 'SmartCollectionSync'
 }
 
 export interface Message<T> {
@@ -107,12 +137,7 @@ export class MessageHubService {
    */
   public onlineUsers$ = this.onlineUsersSource.asObservable();
 
-
-  isAdmin: boolean = false;
-
-  constructor(private toastr: ToastrService, private router: Router) {
-
-  }
+  constructor() {}
 
   /**
    * Tests that an event is of the type passed
@@ -128,14 +153,13 @@ export class MessageHubService {
     return event.event === eventType;
   }
 
-  createHubConnection(user: User, isAdmin: boolean) {
-    this.isAdmin = isAdmin;
-
+  createHubConnection(user: User) {
     this.hubConnection = new HubConnectionBuilder()
       .withUrl(this.hubUrl + 'messages', {
         accessTokenFactory: () => user.token
       })
       .withAutomaticReconnect()
+      //.withStatefulReconnect() // Requires signalr@8.0
       .build();
 
     this.hubConnection
@@ -181,6 +205,32 @@ export class MessageHubService {
       });
     });
 
+    this.hubConnection.on(EVENTS.SmartCollectionSync, resp => {
+      this.messagesSource.next({
+        event: EVENTS.NotificationProgress,
+        payload: resp.body
+      });
+    });
+
+    this.hubConnection.on(EVENTS.SiteThemeUpdated, resp => {
+      this.messagesSource.next({
+        event: EVENTS.SiteThemeUpdated,
+        payload: resp.body as SiteThemeUpdatedEvent
+      });
+    });
+
+    this.hubConnection.on(EVENTS.DashboardUpdate, resp => {
+      this.messagesSource.next({
+        event: EVENTS.DashboardUpdate,
+        payload: resp.body as DashboardUpdateEvent
+      });
+    });
+    this.hubConnection.on(EVENTS.SideNavUpdate, resp => {
+      this.messagesSource.next({
+        event: EVENTS.SideNavUpdate,
+        payload: resp.body as SideNavUpdateEvent
+      });
+    });
 
     this.hubConnection.on(EVENTS.NotificationProgress, (resp: NotificationProgressEvent) => {
       this.messagesSource.next({
@@ -196,9 +246,9 @@ export class MessageHubService {
       });
     });
 
-    this.hubConnection.on(EVENTS.SeriesAddedToCollection, resp => {
+    this.hubConnection.on(EVENTS.CollectionUpdated, resp => {
       this.messagesSource.next({
-        event: EVENTS.SeriesAddedToCollection,
+        event: EVENTS.CollectionUpdated,
         payload: resp.body
       });
     });
@@ -245,6 +295,20 @@ export class MessageHubService {
       });
     });
 
+    this.hubConnection.on(EVENTS.ChapterRemoved, resp => {
+      this.messagesSource.next({
+        event: EVENTS.ChapterRemoved,
+        payload: resp.body
+      });
+    });
+
+    this.hubConnection.on(EVENTS.VolumeRemoved, resp => {
+      this.messagesSource.next({
+        event: EVENTS.VolumeRemoved,
+        payload: resp.body
+      });
+    });
+
     this.hubConnection.on(EVENTS.CoverUpdate, resp => {
       this.messagesSource.next({
         event: EVENTS.CoverUpdate,
@@ -262,6 +326,13 @@ export class MessageHubService {
     this.hubConnection.on(EVENTS.SendingToDevice, resp => {
       this.messagesSource.next({
         event: EVENTS.SendingToDevice,
+        payload: resp.body
+      });
+    });
+
+    this.hubConnection.on(EVENTS.ScrobblingKeyExpired, resp => {
+      this.messagesSource.next({
+        event: EVENTS.ScrobblingKeyExpired,
         payload: resp.body
       });
     });

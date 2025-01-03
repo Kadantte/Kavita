@@ -4,9 +4,12 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Xml.Linq;
 using System.Xml.Serialization;
 using API.Archive;
 using API.Data.Metadata;
+using API.Entities.Enums;
 using API.Extensions;
 using API.Services.Tasks;
 using Kavita.Common;
@@ -16,23 +19,33 @@ using SharpCompress.Common;
 
 namespace API.Services;
 
+#nullable enable
+
 public interface IArchiveService
 {
     void ExtractArchive(string archivePath, string extractPath);
     int GetNumberOfPagesFromArchive(string archivePath);
-    string GetCoverImage(string archivePath, string fileName, string outputDirectory, bool saveAsWebP = false);
+    string GetCoverImage(string archivePath, string fileName, string outputDirectory, EncodeFormat format, CoverImageSize size = CoverImageSize.Default);
     bool IsValidArchive(string archivePath);
     ComicInfo? GetComicInfo(string archivePath);
     ArchiveLibrary CanOpen(string archivePath);
     bool ArchiveNeedsFlattening(ZipArchive archive);
     /// <summary>
-    /// Creates a zip file form the listed files and outputs to the temp folder.
+    /// Creates a zip file form the listed files and outputs to the temp folder. This will combine into one zip of multiple zips.
     /// </summary>
     /// <param name="files">List of files to be zipped up. Should be full file paths.</param>
     /// <param name="tempFolder">Temp folder name to use for preparing the files. Will be created and deleted</param>
     /// <returns>Path to the temp zip</returns>
     /// <exception cref="KavitaException"></exception>
     string CreateZipForDownload(IEnumerable<string> files, string tempFolder);
+    /// <summary>
+    /// Creates a zip file form the listed files and outputs to the temp folder. This will extract each archive and combine them into one zip.
+    /// </summary>
+    /// <param name="files">List of files to be zipped up. Should be full file paths.</param>
+    /// <param name="tempFolder">Temp folder name to use for preparing the files. Will be created and deleted</param>
+    /// <returns>Path to the temp zip</returns>
+    /// <exception cref="KavitaException"></exception>
+    string CreateZipFromFoldersForDownload(IList<string> files, string tempFolder, Func<Tuple<string, float>, Task> progressCallback);
 }
 
 /// <summary>
@@ -44,13 +57,16 @@ public class ArchiveService : IArchiveService
     private readonly ILogger<ArchiveService> _logger;
     private readonly IDirectoryService _directoryService;
     private readonly IImageService _imageService;
+    private readonly IMediaErrorService _mediaErrorService;
     private const string ComicInfoFilename = "ComicInfo.xml";
 
-    public ArchiveService(ILogger<ArchiveService> logger, IDirectoryService directoryService, IImageService imageService)
+    public ArchiveService(ILogger<ArchiveService> logger, IDirectoryService directoryService,
+        IImageService imageService, IMediaErrorService mediaErrorService)
     {
         _logger = logger;
         _directoryService = directoryService;
         _imageService = imageService;
+        _mediaErrorService = mediaErrorService;
     }
 
     /// <summary>
@@ -111,15 +127,19 @@ public class ArchiveService : IArchiveService
                 }
                 case ArchiveLibrary.NotSupported:
                     _logger.LogWarning("[GetNumberOfPagesFromArchive] This archive cannot be read: {ArchivePath}. Defaulting to 0 pages", archivePath);
+                    _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService, "File format not supported", string.Empty);
                     return 0;
                 default:
                     _logger.LogWarning("[GetNumberOfPagesFromArchive] There was an exception when reading archive stream: {ArchivePath}. Defaulting to 0 pages", archivePath);
+                    _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService, "File format not supported", string.Empty);
                     return 0;
             }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[GetNumberOfPagesFromArchive] There was an exception when reading archive stream: {ArchivePath}. Defaulting to 0 pages", archivePath);
+            _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService,
+                "This archive cannot be read or not supported", ex);
             return 0;
         }
     }
@@ -196,11 +216,11 @@ public class ArchiveService : IArchiveService
     /// <param name="archivePath"></param>
     /// <param name="fileName">File name to use based on context of entity.</param>
     /// <param name="outputDirectory">Where to output the file, defaults to covers directory</param>
-    /// <param name="saveAsWebP">When saving the file, use WebP encoding instead of PNG</param>
+    /// <param name="format">When saving the file, use encoding</param>
     /// <returns></returns>
-    public string GetCoverImage(string archivePath, string fileName, string outputDirectory, bool saveAsWebP = false)
+    public string GetCoverImage(string archivePath, string fileName, string outputDirectory, EncodeFormat format, CoverImageSize size = CoverImageSize.Default)
     {
-        if (archivePath == null || !IsValidArchive(archivePath)) return string.Empty;
+        if (string.IsNullOrEmpty(archivePath) || !IsValidArchive(archivePath)) return string.Empty;
         try
         {
             var libraryHandler = CanOpen(archivePath);
@@ -214,7 +234,7 @@ public class ArchiveService : IArchiveService
                     var entry = archive.Entries.Single(e => e.FullName == entryName);
 
                     using var stream = entry.Open();
-                    return _imageService.WriteCoverThumbnail(stream, fileName, outputDirectory, saveAsWebP);
+                    return _imageService.WriteCoverThumbnail(stream, fileName, outputDirectory, format, size);
                 }
                 case ArchiveLibrary.SharpCompress:
                 {
@@ -225,7 +245,7 @@ public class ArchiveService : IArchiveService
                     var entry = archive.Entries.Single(e => e.Key == entryName);
 
                     using var stream = entry.OpenEntryStream();
-                    return _imageService.WriteCoverThumbnail(stream, fileName, outputDirectory, saveAsWebP);
+                    return _imageService.WriteCoverThumbnail(stream, fileName, outputDirectory, format, size);
                 }
                 case ArchiveLibrary.NotSupported:
                     _logger.LogWarning("[GetCoverImage] This archive cannot be read: {ArchivePath}. Defaulting to no cover image", archivePath);
@@ -238,6 +258,8 @@ public class ArchiveService : IArchiveService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[GetCoverImage] There was an exception when reading archive stream: {ArchivePath}. Defaulting to no cover image", archivePath);
+            _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService,
+                "This archive cannot be read or not supported", ex); // TODO: Localize this
         }
 
         return string.Empty;
@@ -265,7 +287,7 @@ public class ArchiveService : IArchiveService
     {
         // Sometimes ZipArchive will list the directory and others it will just keep it in the FullName
         return archive.Entries.Count > 0 &&
-               !Path.HasExtension(archive.Entries.ElementAt(0).FullName) ||
+               !Path.HasExtension(archive.Entries[0].FullName) ||
                archive.Entries.Any(e => e.FullName.Contains(Path.AltDirectorySeparatorChar) && !Tasks.Scanner.Parser.Parser.HasBlacklistedFolderInPath(e.FullName));
     }
 
@@ -292,7 +314,7 @@ public class ArchiveService : IArchiveService
 
         if (!_directoryService.CopyFilesToDirectory(files, tempLocation))
         {
-            throw new KavitaException("Unable to copy files to temp directory archive download.");
+            throw new KavitaException("bad-copy-files-for-download");
         }
 
         var zipPath = Path.Join(_directoryService.TempDirectory, $"kavita_{tempFolder}_{dateString}.zip");
@@ -305,7 +327,62 @@ public class ArchiveService : IArchiveService
         catch (AggregateException ex)
         {
             _logger.LogError(ex, "There was an issue creating temp archive");
-            throw new KavitaException("There was an issue creating temp archive");
+            throw new KavitaException("generic-create-temp-archive");
+        }
+
+        return zipPath;
+    }
+
+    public string CreateZipFromFoldersForDownload(IList<string> files, string tempFolder, Func<Tuple<string, float>, Task> progressCallback)
+    {
+        var dateString = DateTime.UtcNow.ToShortDateString().Replace("/", "_");
+
+        var potentialExistingFile = _directoryService.FileSystem.FileInfo.New(Path.Join(_directoryService.TempDirectory, $"kavita_{tempFolder}_{dateString}.cbz"));
+        if (potentialExistingFile.Exists)
+        {
+            // A previous download exists, just return it immediately
+            return potentialExistingFile.FullName;
+        }
+
+        // Extract all the files to a temp directory and create zip on that
+        var tempLocation = Path.Join(_directoryService.TempDirectory, $"{tempFolder}_{dateString}");
+        var totalFiles = files.Count + 1;
+        var count = 1f;
+        try
+        {
+            _directoryService.ExistOrCreate(tempLocation);
+            foreach (var path in files)
+            {
+                var tempPath = Path.Join(tempLocation, _directoryService.FileSystem.Path.GetFileNameWithoutExtension(_directoryService.FileSystem.FileInfo.New(path).Name));
+                progressCallback(Tuple.Create(_directoryService.FileSystem.FileInfo.New(path).Name, (1.0f * totalFiles) / count));
+                if (Tasks.Scanner.Parser.Parser.IsArchive(path))
+                {
+                    ExtractArchive(path, tempPath);
+                }
+                else
+                {
+                    _directoryService.CopyFileToDirectory(path, tempPath);
+                }
+
+                count++;
+            }
+        }
+        catch
+        {
+            throw new KavitaException("bad-copy-files-for-download");
+        }
+
+        var zipPath = Path.Join(_directoryService.TempDirectory, $"kavita_{tempFolder}_{dateString}.cbz");
+        try
+        {
+            ZipFile.CreateFromDirectory(tempLocation, zipPath);
+            // Remove the folder as we have the zip
+            _directoryService.ClearAndDeleteDirectory(tempLocation);
+        }
+        catch (AggregateException ex)
+        {
+            _logger.LogError(ex, "There was an issue creating temp archive");
+            throw new KavitaException("generic-create-temp-archive");
         }
 
         return zipPath;
@@ -325,7 +402,7 @@ public class ArchiveService : IArchiveService
             return false;
         }
 
-        if (Tasks.Scanner.Parser.Parser.IsArchive(archivePath) || Tasks.Scanner.Parser.Parser.IsEpub(archivePath)) return true;
+        if (Tasks.Scanner.Parser.Parser.IsArchive(archivePath)) return true;
 
         _logger.LogWarning("Archive {ArchivePath} is not a valid archive", archivePath);
         return false;
@@ -364,10 +441,7 @@ public class ArchiveService : IArchiveService
                     if (entry != null)
                     {
                         using var stream = entry.Open();
-                        var serializer = new XmlSerializer(typeof(ComicInfo));
-                        var info = (ComicInfo?) serializer.Deserialize(stream);
-                        ComicInfo.CleanComicInfo(info);
-                        return info;
+                        return Deserialize(stream);
                     }
 
                     break;
@@ -382,9 +456,7 @@ public class ArchiveService : IArchiveService
                     if (entry != null)
                     {
                         using var stream = entry.OpenEntryStream();
-                        var serializer = new XmlSerializer(typeof(ComicInfo));
-                        var info = (ComicInfo?) serializer.Deserialize(stream);
-                        ComicInfo.CleanComicInfo(info);
+                        var info = Deserialize(stream);
                         return info;
                     }
 
@@ -403,9 +475,33 @@ public class ArchiveService : IArchiveService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[GetComicInfo] There was an exception when reading archive stream: {Filepath}", archivePath);
+            _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService,
+                "This archive cannot be read or not supported", ex);
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Strips out empty tags before deserializing
+    /// </summary>
+    /// <param name="stream"></param>
+    /// <returns></returns>
+    private static ComicInfo? Deserialize(Stream stream)
+    {
+        var comicInfoXml = XDocument.Load(stream);
+        comicInfoXml.Descendants()
+            .Where(e => e.IsEmpty || string.IsNullOrWhiteSpace(e.Value))
+            .Remove();
+
+        var serializer = new XmlSerializer(typeof(ComicInfo));
+        using var reader = comicInfoXml.Root?.CreateReader();
+        if (reader == null) return null;
+
+        var info  = (ComicInfo?) serializer.Deserialize(reader);
+        ComicInfo.CleanComicInfo(info);
+        return info;
+
     }
 
 
@@ -417,7 +513,7 @@ public class ArchiveService : IArchiveService
         {
             entry.WriteToDirectory(extractPath, new ExtractionOptions()
             {
-                ExtractFullPath = true, // Don't flatten, let the flatterner ensure correct order of nested folders
+                ExtractFullPath = true, // Don't flatten, let the flattener ensure correct order of nested folders
                 Overwrite = false
             });
         }
@@ -447,7 +543,7 @@ public class ArchiveService : IArchiveService
     {
         if (!IsValidArchive(archivePath)) return;
 
-        if (Directory.Exists(extractPath)) return;
+        if (_directoryService.FileSystem.Directory.Exists(extractPath)) return;
 
         if (!_directoryService.FileSystem.File.Exists(archivePath))
         {
@@ -485,9 +581,11 @@ public class ArchiveService : IArchiveService
             }
 
         }
-        catch (Exception e)
+        catch (Exception ex)
         {
-            _logger.LogWarning(e, "[ExtractArchive] There was a problem extracting {ArchivePath} to {ExtractPath}",archivePath, extractPath);
+            _logger.LogWarning(ex, "[ExtractArchive] There was a problem extracting {ArchivePath} to {ExtractPath}",archivePath, extractPath);
+            _mediaErrorService.ReportMediaIssue(archivePath, MediaErrorProducer.ArchiveService,
+                "This archive cannot be read or not supported", ex);
             throw new KavitaException(
                 $"There was an error when extracting {archivePath}. Check the file exists, has read permissions or the server OS can support all path characters.");
         }

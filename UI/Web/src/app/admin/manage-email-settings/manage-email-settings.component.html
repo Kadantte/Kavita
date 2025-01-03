@@ -1,32 +1,155 @@
-<div class="container-fluid">
-    <form [formGroup]="settingsForm" *ngIf="serverSettings !== undefined">
-        <h4>Email Services (SMTP)</h4>
-        <p>Kavita comes out of the box with an email service to power tasks like inviting users, password reset requests, etc. Emails sent via our service are deleted immediately. You can use your own
-            email service by setting up the <a href="https://github.com/Kareadita/KavitaEmail" target="_blank" rel="noopener noreferrer">Kavita Email</a> service. Set the URL of the email service and use the Test button to ensure it works.
-            You can reset these settings to default at any time. There is no way to disable emails for authentication, although you are not required to use a
-            valid email address for users. Confirmation links will always be saved to logs and presented in the UI.
-            Registration/confirmation emails will not be sent if you are not accessing Kavita via a publicly reachable URL or unless the Host Name feature is configured.
-            <span class="text-warning">If you want Send to Device to work you must host your own email service.</span>
-        </p>
-        <div class="mb-3">
-            <label for="settings-emailservice" class="form-label">Email Service URL</label><i class="ms-1 fa fa-info-circle" placement="right" [ngbTooltip]="emailServiceTooltip" role="button" tabindex="0"></i>
-            <ng-template #emailServiceTooltip>Use fully qualified URL of the email service. Do not include ending slash.</ng-template>
-            <span class="visually-hidden" id="settings-emailservice-help"><ng-container [ngTemplateOutlet]="emailServiceTooltip"></ng-container></span>
-            <div class="input-group">
-                <input id="settings-emailservice" aria-describedby="settings-emailservice-help" class="form-control" formControlName="emailServiceUrl" type="url" autocapitalize="off" inputmode="url" aria-describedby="change-bookmarks-dir">
-                <button class="btn btn-outline-secondary" (click)="resetEmailServiceUrl()">
-                    Reset
-                </button>
-                <button class="btn btn-outline-secondary" (click)="testEmailServiceUrl()">
-                    Test
-                </button>
-            </div>
-        </div>
+<ng-container *transloco="let t; read: 'manage-email-settings'">
 
-        <div class="col-auto d-flex d-md-block justify-content-sm-center text-md-end">
-            <button type="button" class="flex-fill btn btn-secondary me-2" (click)="resetToDefaults()">Reset to Default</button>
-            <button type="button" class="flex-fill btn btn-secondary me-2" (click)="resetForm()">Reset</button>
-            <button type="submit" class="flex-fill btn btn-primary" (click)="saveSettings()" [disabled]="!settingsForm.dirty">Save</button>
-        </div>
-    </form>
-</div>
+  <div class="position-relative">
+    <button type="button" class="btn btn-primary-outline position-absolute custom-position" (click)="test()">{{t('test')}}</button>
+  </div>
+
+  <p>{{t('description')}}</p>
+
+
+  <form [formGroup]="settingsForm">
+    <p class="alert alert-warning">{{t('setting-description')}} {{t('test-warning')}}</p>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('hostName'); as formControl) {
+        <app-setting-item [title]="t('host-name-label')" [subtitle]="t('host-name-tooltip')" [control]="formControl">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <div class="input-group">
+              <input id="settings-hostname" aria-describedby="hostname-validations" class="form-control" formControlName="hostName" type="text"
+                     [class.is-invalid]="formControl.invalid && !formControl.untouched">
+              <button type="button" class="btn btn-outline-secondary" (click)="autofillGmail()">{{t('gmail-label')}}</button>
+              <button type="button" class="btn btn-outline-secondary" (click)="autofillOutlook()">{{t('outlook-label')}}</button>
+            </div>
+
+            @if (formControl.errors; as errors) {
+              <div id="hostname-validations" class="invalid-feedback" style="display: inline-block">
+                @if (errors.pattern) {
+                  <div>{{t('host-name-validation')}}</div>
+                }
+              </div>
+            }
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('senderAddress'); as formControl) {
+        <app-setting-item [title]="t('sender-address-label')" [subtitle]="t('sender-address-tooltip')">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="text" class="form-control" formControlName="senderAddress" id="settings-sender-address" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('senderDisplayName'); as formControl) {
+        <app-setting-item [title]="t('sender-displayname-label')" [subtitle]="t('sender-displayname-tooltip')">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="text" class="form-control" formControlName="senderDisplayName" id="settings-sender-displayname" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('host'); as formControl) {
+        <app-setting-item [title]="t('host-label')" [subtitle]="t('host-tooltip')">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="text" class="form-control" formControlName="host" id="settings-host" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('port'); as formControl) {
+        <app-setting-item [title]="t('port-label')">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="number" inputmode="numeric" min="1" class="form-control" formControlName="port" id="settings-port" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if(settingsForm.get('enableSsl'); as formControl) {
+        <app-setting-switch [title]="t('enable-ssl-label')">
+          <ng-template #switch>
+            <div class="form-check form-switch float-end">
+              <input id="setting-enable-ssl" type="checkbox" class="form-check-input" formControlName="enableSsl">
+            </div>
+          </ng-template>
+        </app-setting-switch>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('userName'); as formControl) {
+        <app-setting-item [title]="t('username-label')" [subtitle]="t('username-tooltip')">
+          <ng-template #view>
+            {{formControl.value | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="text" class="form-control" formControlName="userName" id="settings-username" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('password'); as formControl) {
+        <app-setting-item [title]="t('password-label')">
+          <ng-template #view>
+            {{formControl.value ? '********' : null | defaultValue}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="text" class="form-control" formControlName="password" id="settings-password" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if (settingsForm.get('sizeLimit'); as formControl) {
+        <app-setting-item [title]="t('size-limit-label')" [subtitle]="t('size-limit-tooltip')">
+          <ng-template #view>
+            {{formControl.value | bytes}}
+          </ng-template>
+          <ng-template #edit>
+            <input type="number" inputmode="numeric" min="1" class="form-control" formControlName="sizeLimit" id="settings-size-limit" />
+          </ng-template>
+        </app-setting-item>
+      }
+    </div>
+
+    <div class="row g-0 mt-2">
+      @if(settingsForm.get('customizedTemplates'); as formControl) {
+        <app-setting-switch [title]="t('customized-templates-label')" [subtitle]="t('customized-templates-tooltip')">
+          <ng-template #switch>
+            <div class="form-check form-switch float-end">
+              <input id="settings-customized-templates" type="checkbox" class="form-check-input" formControlName="customizedTemplates">
+            </div>
+          </ng-template>
+        </app-setting-switch>
+      }
+    </div>
+  </form>
+
+</ng-container>

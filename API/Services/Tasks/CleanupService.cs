@@ -13,18 +13,21 @@ using Hangfire;
 using Microsoft.Extensions.Logging;
 
 namespace API.Services.Tasks;
+#nullable enable
 
 public interface ICleanupService
 {
     Task Cleanup();
     Task CleanupDbEntries();
     void CleanupCacheAndTempDirectories();
+    void CleanupCacheDirectory();
     Task DeleteSeriesCoverImages();
     Task DeleteChapterCoverImages();
     Task DeleteTagCoverImages();
     Task CleanupBackups();
     Task CleanupLogs();
     void CleanupTemp();
+    Task EnsureChapterProgressIsCapped();
     /// <summary>
     /// Responsible to remove Series from Want To Read when user's have fully read the series and the series has Publication Status of Completed or Cancelled.
     /// </summary>
@@ -58,14 +61,14 @@ public class CleanupService : ICleanupService
     [AutomaticRetry(Attempts = 3, LogEvents = false, OnAttemptsExceeded = AttemptsExceededAction.Fail)]
     public async Task Cleanup()
     {
-        if (TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllCoverToWebP", Array.Empty<object>(),
+        if (TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllCoverToEncoding", Array.Empty<object>(),
                 TaskScheduler.DefaultQueue, true) ||
-            TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllBookmarkToWebP", Array.Empty<object>(),
+            TaskScheduler.HasAlreadyEnqueuedTask(BookmarkService.Name, "ConvertAllBookmarkToEncoding", Array.Empty<object>(),
                 TaskScheduler.DefaultQueue, true))
         {
-            _logger.LogInformation("Cleanup put on hold as a conversion to WebP in progress");
+            _logger.LogInformation("Cleanup put on hold as a media conversion in progress");
             await _eventHub.SendMessageAsync(MessageFactory.NotificationProgress,
-                MessageFactory.ErrorEvent("Cleanup", "Cleanup put on hold as a conversion to WebP in progress"));
+                MessageFactory.ErrorEvent("Cleanup", "Cleanup put on hold as a media conversion in progress"));
             return;
         }
 
@@ -88,6 +91,10 @@ public class CleanupService : ICleanupService
         await DeleteReadingListCoverImages();
         await SendProgress(0.8F, "Cleaning old logs");
         await CleanupLogs();
+        await SendProgress(0.9F, "Cleaning progress events that exceed 100%");
+        await EnsureChapterProgressIsCapped();
+        await SendProgress(0.95F, "Cleaning abandoned database rows");
+        await CleanupDbEntries();
         await SendProgress(1F, "Cleanup finished");
         _logger.LogInformation("Cleanup finished");
     }
@@ -100,7 +107,7 @@ public class CleanupService : ICleanupService
         await _unitOfWork.AppUserProgressRepository.CleanupAbandonedChapters();
         await _unitOfWork.PersonRepository.RemoveAllPeopleNoLongerAssociated();
         await _unitOfWork.GenreRepository.RemoveAllGenreNoLongerAssociated();
-        await _unitOfWork.CollectionTagRepository.RemoveTagsWithoutSeries();
+        await _unitOfWork.CollectionTagRepository.RemoveCollectionsWithoutSeries();
         await _unitOfWork.ReadingListRepository.RemoveReadingListsWithoutSeries();
     }
 
@@ -170,6 +177,23 @@ public class CleanupService : ICleanupService
         }
 
         _logger.LogInformation("Cache and temp directory purged");
+    }
+
+    public void CleanupCacheDirectory()
+    {
+        _logger.LogInformation("Performing cleanup of Cache directories");
+        _directoryService.ExistOrCreate(_directoryService.CacheDirectory);
+
+        try
+        {
+            _directoryService.ClearDirectory(_directoryService.CacheDirectory);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "There was an issue deleting one or more folders/files during cleanup");
+        }
+
+        _logger.LogInformation("Cache directory purged");
     }
 
     /// <summary>
@@ -242,6 +266,20 @@ public class CleanupService : ICleanupService
         _logger.LogInformation("Temp directory purged");
     }
 
+    /// <summary>
+    /// Ensures that each chapter's progress (pages read) is capped at the total pages. This can get out of sync when a chapter is replaced after being read with one with lower page count.
+    /// </summary>
+    /// <returns></returns>
+    public async Task EnsureChapterProgressIsCapped()
+    {
+        _logger.LogInformation("Cleaning up any progress rows that exceed chapter page count");
+        await _unitOfWork.AppUserProgressRepository.UpdateAllProgressThatAreMoreThanChapterPages();
+        _logger.LogInformation("Cleaning up any progress rows that exceed chapter page count - complete");
+    }
+
+    /// <summary>
+    /// This does not cleanup any Series that are not Completed or Cancelled
+    /// </summary>
     public async Task CleanupWantToRead()
     {
         _logger.LogInformation("Performing cleanup of Series that are Completed and have been fully read that are in Want To Read list");
@@ -268,8 +306,8 @@ public class CleanupService : ICleanupService
             var seriesIds = series.Select(s => s.Id).ToList();
             if (seriesIds.Count == 0) continue;
 
-            user.WantToRead ??= new List<Series>();
-            user.WantToRead = user.WantToRead.Where(s => !seriesIds.Contains(s.Id)).ToList();
+            user.WantToRead ??= new List<AppUserWantToRead>();
+            user.WantToRead = user.WantToRead.Where(s => !seriesIds.Contains(s.SeriesId)).ToList();
             _unitOfWork.UserRepository.Update(user);
         }
 

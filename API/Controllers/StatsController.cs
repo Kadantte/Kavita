@@ -1,5 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using API.Constants;
 using API.Data;
@@ -7,24 +10,39 @@ using API.DTOs.Statistics;
 using API.Entities;
 using API.Entities.Enums;
 using API.Extensions;
+using API.Helpers;
 using API.Services;
+using API.Services.Plus;
+using API.Services.Tasks.Scanner.Parser;
+using CsvHelper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using MimeTypes;
 
 namespace API.Controllers;
+
+#nullable enable
 
 public class StatsController : BaseApiController
 {
     private readonly IStatisticService _statService;
     private readonly IUnitOfWork _unitOfWork;
     private readonly UserManager<AppUser> _userManager;
+    private readonly ILocalizationService _localizationService;
+    private readonly ILicenseService _licenseService;
+    private readonly IDirectoryService _directoryService;
 
-    public StatsController(IStatisticService statService, IUnitOfWork unitOfWork, UserManager<AppUser> userManager)
+    public StatsController(IStatisticService statService, IUnitOfWork unitOfWork,
+        UserManager<AppUser> userManager, ILocalizationService localizationService,
+        ILicenseService licenseService, IDirectoryService directoryService)
     {
         _statService = statService;
         _unitOfWork = unitOfWork;
         _userManager = userManager;
+        _localizationService = localizationService;
+        _licenseService = licenseService;
+        _directoryService = directoryService;
     }
 
     [HttpGet("user/{userId}/read")]
@@ -33,7 +51,7 @@ public class StatsController : BaseApiController
     {
         var user = await _unitOfWork.UserRepository.GetUserByUsernameAsync(User.GetUsername());
         if (user!.Id != userId && !await _userManager.IsInRoleAsync(user, PolicyConstants.AdminRole))
-            return Unauthorized("You are not authorized to view another user's statistics");
+            return Unauthorized(await _localizationService.Translate(User.GetUserId(), "stats-permission-denied"));
 
         return Ok(await _statService.GetUserReadStatistics(userId, new List<int>()));
     }
@@ -103,6 +121,34 @@ public class StatsController : BaseApiController
         return Ok(await _statService.GetFileBreakdown());
     }
 
+    /// <summary>
+    /// Generates a csv of all file paths for a given extension
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpGet("server/file-extension")]
+    [ResponseCache(CacheProfileName = "Statistics")]
+    public async Task<ActionResult> DownloadFilesByExtension(string fileExtension)
+    {
+        if (!Regex.IsMatch(fileExtension, Parser.SupportedExtensions))
+        {
+            return BadRequest("Invalid file format");
+        }
+        var tempFile = Path.Join(_directoryService.TempDirectory,
+            $"file_breakdown_{fileExtension.Replace(".", string.Empty)}.csv");
+
+        if (!_directoryService.FileSystem.File.Exists(tempFile))
+        {
+            var results = await _statService.GetFilesByExtension(fileExtension);
+            await using var writer = new StreamWriter(tempFile);
+            await using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
+            await csv.WriteRecordsAsync(results);
+        }
+
+        return PhysicalFile(tempFile, MimeTypeMap.GetMimeType(Path.GetExtension(tempFile)),
+            System.Web.HttpUtility.UrlEncode(Path.GetFileName(tempFile)), true);
+    }
+
 
     /// <summary>
     /// Returns reading history events for a give or all users, broken up by day, and format
@@ -122,12 +168,19 @@ public class StatsController : BaseApiController
     }
 
     [HttpGet("day-breakdown")]
-    [Authorize("RequireAdminRole")]
     [ResponseCache(CacheProfileName = "Statistics")]
-    public ActionResult<IEnumerable<StatCount<DayOfWeek>>> GetDayBreakdown()
+    public async Task<ActionResult<IEnumerable<StatCount<DayOfWeek>>>> GetDayBreakdown(int userId = 0)
     {
-        return Ok(_statService.GetDayBreakdown());
+        if (userId == 0)
+        {
+            var user = await _unitOfWork.UserRepository.GetUserByUsernameAsync(User.GetUsername());
+            var isAdmin = await _unitOfWork.UserRepository.IsUserAdminAsync(user);
+            if (!isAdmin) return BadRequest();
+        }
+
+        return Ok(_statService.GetDayBreakdown(userId));
     }
+
 
 
     [HttpGet("user/reading-history")]
@@ -169,6 +222,18 @@ public class StatsController : BaseApiController
         return Ok(_statService.GetWordsReadCountByYear(userId));
     }
 
-
+    /// <summary>
+    /// Returns for Kavita+ the number of Series that have been processed, errored, and not processed
+    /// </summary>
+    /// <returns></returns>
+    [Authorize("RequireAdminRole")]
+    [HttpGet("kavitaplus-metadata-breakdown")]
+    [ResponseCache(CacheProfileName = "Statistics")]
+    public async Task<ActionResult<IEnumerable<StatCount<int>>>> GetKavitaPlusMetadataBreakdown()
+    {
+        if (!await _licenseService.HasActiveLicense())
+            return BadRequest("This data is not available for non-Kavita+ servers");
+        return Ok(await _statService.GetKavitaPlusMetadataBreakdown());
+    }
 
 }

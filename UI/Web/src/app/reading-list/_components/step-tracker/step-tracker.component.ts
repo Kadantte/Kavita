@@ -1,5 +1,5 @@
-import { Component, Input, ChangeDetectionStrategy, OnInit, ChangeDetectorRef } from '@angular/core';
-import { BehaviorSubject, ReplaySubject } from 'rxjs';
+import { Component, Input, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
+import {CommonModule} from "@angular/common";
 
 
 export interface TimelineStep {
@@ -12,6 +12,8 @@ export interface TimelineStep {
 
 @Component({
   selector: 'app-step-tracker',
+  standalone: true,
+  imports: [CommonModule],
   templateUrl: './step-tracker.component.html',
   styleUrls: ['./step-tracker.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -19,7 +21,7 @@ export interface TimelineStep {
 export class StepTrackerComponent {
   @Input() steps: Array<TimelineStep> = [];
   @Input() currentStep: number = 0;
-  
+
 
   constructor(private readonly cdRef: ChangeDetectorRef) {}
 

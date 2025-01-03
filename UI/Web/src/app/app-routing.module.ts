@@ -6,81 +6,108 @@ import { AdminGuard } from './_guards/admin.guard';
 
 const routes: Routes = [
   {
-    path: 'admin',
-    canActivate: [AdminGuard],
-    loadChildren: () => import('./admin/admin.module').then(m => m.AdminModule)
-  },
-  {
-    path: 'collections',
+    path: '',
     canActivate: [AuthGuard],
-    loadChildren: () => import('./collections/collections.module').then(m => m.CollectionsModule)
-  },
-  {
-    path: 'preferences',
-    canActivate: [AuthGuard],
-    loadChildren: () => import('./user-settings/user-settings.module').then(m => m.UserSettingsModule)
-  },
-  {
-    path: 'lists',
-    canActivate: [AuthGuard],
-    loadChildren: () => import('./reading-list/reading-list.module').then(m => m.ReadingListModule)
+    runGuardsAndResolvers: 'always',
+    children: [
+      {
+        path: 'settings',
+        loadChildren: () => import('./_routes/settings-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'collections',
+        loadChildren: () => import('./_routes/collections-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'lists',
+        loadChildren: () => import('./_routes/reading-list-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'announcements',
+        loadChildren: () => import('./_routes/announcements-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'bookmarks',
+        loadChildren: () => import('./_routes/bookmark-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'all-series',
+        loadChildren: () => import('./_routes/all-series-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'all-filters',
+        loadChildren: () => import('./_routes/all-filters-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'want-to-read',
+        loadChildren: () => import('./_routes/want-to-read-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'home',
+        loadChildren: () => import('./_routes/dashboard-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'person',
+        loadChildren: () => import('./_routes/person-detail-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'browse/authors',
+        loadChildren: () => import('./_routes/browse-authors-routing.module').then(m => m.routes)
+      },
+      {
+        path: 'library',
+        runGuardsAndResolvers: 'always',
+        canActivate: [AuthGuard, LibraryAccessGuard],
+        children: [
+          {
+            path: ':libraryId',
+            pathMatch: 'full',
+            loadChildren: () => import('./_routes/library-detail-routing.module').then(m => m.routes)
+          },
+          {
+            path: ':libraryId/series/:seriesId',
+            pathMatch: 'full',
+            loadComponent: () => import('../app/series-detail/_components/series-detail/series-detail.component').then(c => c.SeriesDetailComponent)
+          },
+          {
+            path: ':libraryId/series/:seriesId/chapter/:chapterId',
+            pathMatch: 'full',
+            loadComponent: () => import('./chapter-detail/chapter-detail.component').then(c => c.ChapterDetailComponent)
+          },
+          {
+            path: ':libraryId/series/:seriesId/volume/:volumeId',
+            pathMatch: 'full',
+            loadComponent: () => import('./volume-detail/volume-detail.component').then(c => c.VolumeDetailComponent)
+          },
+          {
+            path: ':libraryId/series/:seriesId/manga',
+            loadChildren: () => import('./_routes/manga-reader.router.module').then(m => m.routes)
+          },
+          {
+            path: ':libraryId/series/:seriesId/book',
+            loadChildren: () => import('./_routes/book-reader.router.module').then(m => m.routes)
+          },
+          {
+            path: ':libraryId/series/:seriesId/pdf',
+            loadChildren: () => import('./_routes/pdf-reader.router.module').then(m => m.routes)
+          },
+        ]
+      },
+      {path: '', pathMatch: 'full', redirectTo: 'home'},
+    ]
   },
   {
     path: 'registration',
-    loadChildren: () => import('../app/registration/registration.module').then(m => m.RegistrationModule)
+    loadChildren: () => import('./_routes/registration.router.module').then(m => m.routes)
   },
   {
-    path: 'announcements',
-    loadChildren: () => import('../app/announcements/announcements.module').then(m => m.AnnouncementsModule)
+    path: 'login',
+    loadChildren: () => import('./_routes/registration.router.module').then(m => m.routes) // TODO: Refactor so we just use /registration/login going forward
   },
-  {
-    path: 'bookmarks',
-    loadChildren: () => import('../app/bookmark/bookmark.module').then(m => m.BookmarkModule)
-  },
-  {
-    path: 'all-series',
-    loadChildren: () => import('../app/all-series/all-series.module').then(m => m.AllSeriesModule)
-  },
-  {
-    path: 'libraries',
-    loadChildren: () => import('../app/dashboard/dashboard.module').then(m => m.DashboardModule)
-  },
-  {
-    path: 'want-to-read',
-    loadChildren: () => import('../app/want-to-read/want-to-read.module').then(m => m.WantToReadModule)
-  },
-  {
-    path: 'library',
-    runGuardsAndResolvers: 'always',
-    canActivate: [AuthGuard, LibraryAccessGuard],
-    children: [
-      {
-        path: ':libraryId', 
-        pathMatch: 'full',
-        loadChildren: () => import('../app/library-detail/library-detail.module').then(m => m.LibraryDetailModule)
-      },
-      {
-        path: ':libraryId/series/:seriesId', 
-        pathMatch: 'full',
-        loadChildren: () => import('../app/series-detail/series-detail.module').then(m => m.SeriesDetailModule)
-      },
-      {
-        path: ':libraryId/series/:seriesId/manga',
-        loadChildren: () => import('../app/manga-reader/manga-reader.module').then(m => m.MangaReaderModule)
-      },
-      {
-        path: ':libraryId/series/:seriesId/book',
-        loadChildren: () => import('../app/book-reader/book-reader.module').then(m => m.BookReaderModule)
-      },
-      {
-        path: ':libraryId/series/:seriesId/pdf',
-        loadChildren: () => import('../app/pdf-reader/pdf-reader.module').then(m => m.PdfReaderModule)
-      },
-    ]
-  },
-  {path: 'login', loadChildren: () => import('../app/registration/registration.module').then(m => m.RegistrationModule)},
-  {path: '**', pathMatch: 'full', redirectTo: 'libraries'},
-  {path: '**', pathMatch: 'prefix', redirectTo: 'libraries'},
+  {path: 'libraries', pathMatch: 'full', redirectTo: 'home'},
+  {path: '**', pathMatch: 'prefix', redirectTo: 'home'},
+  {path: '**', pathMatch: 'full', redirectTo: 'home'},
+  {path: '', pathMatch: 'full', redirectTo: 'home'},
 ];
 
 @NgModule({

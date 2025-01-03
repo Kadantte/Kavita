@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace API.Controllers;
 
+#nullable enable
+
 /// <summary>
 /// All APIs are for Tachiyomi extension and app. They have hacks for our implementation and should not be used for any
 /// other purposes.
@@ -16,11 +18,14 @@ public class TachiyomiController : BaseApiController
 {
     private readonly IUnitOfWork _unitOfWork;
     private readonly ITachiyomiService _tachiyomiService;
+    private readonly ILocalizationService _localizationService;
 
-    public TachiyomiController(IUnitOfWork unitOfWork, ITachiyomiService tachiyomiService)
+    public TachiyomiController(IUnitOfWork unitOfWork, ITachiyomiService tachiyomiService,
+        ILocalizationService localizationService)
     {
         _unitOfWork = unitOfWork;
         _tachiyomiService = tachiyomiService;
+        _localizationService = localizationService;
     }
 
     /// <summary>
@@ -31,7 +36,7 @@ public class TachiyomiController : BaseApiController
     [HttpGet("latest-chapter")]
     public async Task<ActionResult<ChapterDto>> GetLatestChapter(int seriesId)
     {
-        if (seriesId < 1) return BadRequest("seriesId must be greater than 0");
+        if (seriesId < 1) return BadRequest(await _localizationService.Translate(User.GetUserId(), "greater-0", "SeriesId"));
         return Ok(await _tachiyomiService.GetLatestChapter(seriesId, User.GetUserId()));
     }
 

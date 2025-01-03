@@ -1,28 +1,30 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, OnInit } from '@angular/core';
-import { FormGroup, FormControl, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
+import {AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, OnInit} from '@angular/core';
+import { FormGroup, FormControl, Validators, ReactiveFormsModule } from '@angular/forms';
+import {ActivatedRoute, Router, RouterLink} from '@angular/router';
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { ToastrService } from 'ngx-toastr';
 import { take } from 'rxjs/operators';
-import { AddEmailToAccountMigrationModalComponent } from '../_modals/add-email-to-account-migration-modal/add-email-to-account-migration-modal.component';
-import { User } from '../../_models/user';
 import { AccountService } from '../../_services/account.service';
 import { MemberService } from '../../_services/member.service';
 import { NavService } from '../../_services/nav.service';
+import { NgIf } from '@angular/common';
+import { SplashContainerComponent } from '../_components/splash-container/splash-container.component';
+import {TRANSLOCO_SCOPE, TranslocoDirective} from "@jsverse/transloco";
 
 
 @Component({
-  selector: 'app-user-login',
-  templateUrl: './user-login.component.html',
-  styleUrls: ['./user-login.component.scss'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+    selector: 'app-user-login',
+    templateUrl: './user-login.component.html',
+    styleUrls: ['./user-login.component.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush,
+    standalone: true,
+  imports: [SplashContainerComponent, NgIf, ReactiveFormsModule, RouterLink, TranslocoDirective]
 })
 export class UserLoginComponent implements OnInit {
 
-  //model: any = {username: '', password: ''};
   loginForm: FormGroup = new FormGroup({
       username: new FormControl('', [Validators.required]),
-      password: new FormControl('', [Validators.required])
+      password: new FormControl('', [Validators.required, Validators.maxLength(256), Validators.minLength(6), Validators.pattern("^.{6,256}$")])
   });
 
   /**
@@ -33,52 +35,53 @@ export class UserLoginComponent implements OnInit {
    * Used for first time the page loads to ensure no flashing
    */
   isLoaded: boolean = false;
+  isSubmitting = false;
 
   constructor(private accountService: AccountService, private router: Router, private memberService: MemberService,
-    private toastr: ToastrService, private navService: NavService, private modalService: NgbModal, 
-    private readonly cdRef: ChangeDetectorRef) {
-      this.navService.showNavBar();
+    private toastr: ToastrService, private navService: NavService,
+    private readonly cdRef: ChangeDetectorRef, private route: ActivatedRoute) {
+      this.navService.hideNavBar();
       this.navService.hideSideNav();
     }
 
   ngOnInit(): void {
-    this.navService.showNavBar();
-    this.navService.hideSideNav();
-    this.cdRef.markForCheck();
-
     this.accountService.currentUser$.pipe(take(1)).subscribe(user => {
       if (user) {
+        this.navService.showNavBar();
         this.navService.showSideNav();
+        this.router.navigateByUrl('/home');
         this.cdRef.markForCheck();
-        this.router.navigateByUrl('/libraries');
       }
     });
-    
+
 
     this.memberService.adminExists().pipe(take(1)).subscribe(adminExists => {
       this.firstTimeFlow = !adminExists;
-      this.isLoaded = true;
 
       if (this.firstTimeFlow) {
         this.router.navigateByUrl('registration/register');
         return;
       }
 
+      this.isLoaded = true;
       this.cdRef.markForCheck();
+    });
+
+    this.route.queryParamMap.subscribe(params => {
+      const val = params.get('apiKey');
+      if (val != null && val.length > 0) {
+        this.login(val);
+      }
     });
   }
 
-  onAdminCreated(user: User | null) {
-    if (user != null) {
-      this.firstTimeFlow = false;
-      this.cdRef.markForCheck();
-    } else {
-      this.toastr.error('There was an issue creating the new user. Please refresh and try again.');
-    }
-  }
 
-  login() {
+
+  login(apiKey: string = '') {
     const model = this.loginForm.getRawValue();
+    model.apiKey = apiKey;
+    this.isSubmitting = true;
+    this.cdRef.markForCheck();
     this.accountService.login(model).subscribe(() => {
       this.loginForm.reset();
       this.navService.showNavBar();
@@ -90,17 +93,15 @@ export class UserLoginComponent implements OnInit {
         localStorage.setItem('kavita--auth-intersection-url', '');
         this.router.navigateByUrl(pageResume);
       } else {
-        this.router.navigateByUrl('/libraries');
+        localStorage.setItem('kavita--auth-intersection-url', '');
+        this.router.navigateByUrl('/home');
       }
+      this.isSubmitting = false;
+      this.cdRef.markForCheck();
     }, err => {
-      if (err.error === 'You are missing an email on your account. Please wait while we migrate your account.') {
-        const modalRef = this.modalService.open(AddEmailToAccountMigrationModalComponent, { scrollable: true, size: 'md' });
-        modalRef.componentInstance.username = model.username;
-        modalRef.closed.pipe(take(1)).subscribe(() => {
-        });
-      } else {
-        this.toastr.error(err.error);
-      }
+      this.toastr.error(err.error);
+      this.isSubmitting = false;
+      this.cdRef.markForCheck();
     });
   }
 }

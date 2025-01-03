@@ -55,7 +55,7 @@ public class BookmarkServiceTests
     private BookmarkService Create(IDirectoryService ds)
     {
         return new BookmarkService(Substitute.For<ILogger<BookmarkService>>(), _unitOfWork, ds,
-            Substitute.For<IImageService>(), Substitute.For<IEventHub>());
+Substitute.For<IMediaConversionService>());
     }
 
     #region Setup
@@ -132,7 +132,7 @@ public class BookmarkServiceTests
 
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
-            .WithVolume(new VolumeBuilder("0")
+            .WithVolume(new VolumeBuilder(API.Services.Tasks.Scanner.Parser.Parser.LooseLeafVolume)
                 .WithChapter(new ChapterBuilder("1")
                     .Build())
                 .Build())
@@ -163,7 +163,7 @@ public class BookmarkServiceTests
 
 
         Assert.True(result);
-        Assert.Equal(1, ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories).Count());
+        Assert.Single(ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories));
         Assert.NotNull(await _unitOfWork.UserRepository.GetBookmarkAsync(1));
     }
 
@@ -180,8 +180,8 @@ public class BookmarkServiceTests
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
             .WithVolume(new VolumeBuilder("1")
-                .WithNumber(1)
-                .WithChapter(new ChapterBuilder("0")
+                .WithMinNumber(1)
+                .WithChapter(new ChapterBuilder(API.Services.Tasks.Scanner.Parser.Parser.DefaultChapter)
                     .Build())
                 .Build())
             .Build();
@@ -223,7 +223,7 @@ public class BookmarkServiceTests
 
 
         Assert.True(result);
-        Assert.Equal(0, ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories).Count());
+        Assert.Empty(ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories));
         Assert.Null(await _unitOfWork.UserRepository.GetBookmarkAsync(1));
     }
 
@@ -246,7 +246,7 @@ public class BookmarkServiceTests
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
             .WithVolume(new VolumeBuilder("1")
-                .WithNumber(1)
+                .WithMinNumber(1)
                 .WithChapter(new ChapterBuilder("1")
                     .Build())
                 .Build())
@@ -322,7 +322,7 @@ public class BookmarkServiceTests
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
             .WithVolume(new VolumeBuilder("1")
-                .WithNumber(1)
+                .WithMinNumber(1)
                 .WithChapter(new ChapterBuilder("1")
                     .Build())
                 .Build())
@@ -375,7 +375,7 @@ public class BookmarkServiceTests
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
             .WithVolume(new VolumeBuilder("1")
-                .WithNumber(1)
+                .WithMinNumber(1)
                 .WithChapter(new ChapterBuilder("1")
                     .Build())
                 .Build())
@@ -411,7 +411,7 @@ public class BookmarkServiceTests
         await _unitOfWork.CommitAsync();
 
 
-        Assert.Equal(1, ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories).Count());
+        Assert.Single(ds.GetFiles(BookmarkDirectory, searchOption:SearchOption.AllDirectories));
         Assert.NotNull(await _unitOfWork.UserRepository.GetBookmarkAsync(1));
     }
 
@@ -428,7 +428,7 @@ public class BookmarkServiceTests
         var series = new SeriesBuilder("Test")
             .WithFormat(MangaFormat.Epub)
             .WithVolume(new VolumeBuilder("1")
-                .WithNumber(1)
+                .WithMinNumber(1)
                 .WithChapter(new ChapterBuilder("1")
                     .Build())
                 .Build())

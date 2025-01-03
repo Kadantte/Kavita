@@ -1,9 +1,12 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { environment } from 'src/environments/environment';
-import { ServerInfo } from '../admin/_models/server-info';
+import {ServerInfoSlim} from '../admin/_models/server-info';
 import { UpdateVersionEvent } from '../_models/events/update-version-event';
 import { Job } from '../_models/job/job';
+import { KavitaMediaError } from '../admin/_models/media-error';
+import {TextResonse} from "../_types/text-response";
+import {map} from "rxjs/operators";
 
 @Injectable({
   providedIn: 'root'
@@ -12,53 +15,74 @@ export class ServerService {
 
   baseUrl = environment.apiUrl;
 
-  constructor(private httpClient: HttpClient) { }
+  constructor(private http: HttpClient) { }
 
-  restart() {
-    return this.httpClient.post(this.baseUrl + 'server/restart', {});
+  getVersion(apiKey: string) {
+    return this.http.get<string>(this.baseUrl + 'plugin/version?apiKey=' + apiKey, TextResonse);
   }
 
   getServerInfo() {
-    return this.httpClient.get<ServerInfo>(this.baseUrl + 'server/server-info');
+    return this.http.get<ServerInfoSlim>(this.baseUrl + 'server/server-info-slim');
   }
 
   clearCache() {
-    return this.httpClient.post(this.baseUrl + 'server/clear-cache', {});
+    return this.http.post(this.baseUrl + 'server/clear-cache', {});
   }
 
   cleanupWantToRead() {
-    return this.httpClient.post(this.baseUrl + 'server/cleanup-want-to-read', {});
+    return this.http.post(this.baseUrl + 'server/cleanup-want-to-read', {});
+  }
+
+  cleanup() {
+    return this.http.post(this.baseUrl + 'server/cleanup', {});
   }
 
   backupDatabase() {
-    return this.httpClient.post(this.baseUrl + 'server/backup-db', {});
+    return this.http.post(this.baseUrl + 'server/backup-db', {});
   }
 
   analyzeFiles() {
-    return this.httpClient.post(this.baseUrl + 'server/analyze-files', {});
+    return this.http.post(this.baseUrl + 'server/analyze-files', {});
+  }
+
+  syncThemes() {
+    return this.http.post(this.baseUrl + 'server/sync-themes', {});
   }
 
   checkForUpdate() {
-    return this.httpClient.get<UpdateVersionEvent>(this.baseUrl + 'server/check-update', {});
+    return this.http.get<UpdateVersionEvent | null>(this.baseUrl + 'server/check-update');
+  }
+
+  checkHowOutOfDate() {
+    return this.http.get<string>(this.baseUrl + 'server/checkHowOutOfDate', TextResonse)
+      .pipe(map(r => parseInt(r, 10)));
+  }
+
+  checkForUpdates() {
+    return this.http.get<UpdateVersionEvent>(this.baseUrl + 'server/check-for-updates', {});
   }
 
   getChangelog() {
-    return this.httpClient.get<UpdateVersionEvent[]>(this.baseUrl + 'server/changelog', {});
-  }
-
-  isServerAccessible() {
-    return this.httpClient.get<boolean>(this.baseUrl + 'server/accessible');
+    return this.http.get<UpdateVersionEvent[]>(this.baseUrl + 'server/changelog', {});
   }
 
   getRecurringJobs() {
-    return this.httpClient.get<Job[]>(this.baseUrl + 'server/jobs');
+    return this.http.get<Job[]>(this.baseUrl + 'server/jobs');
   }
 
-  convertBookmarks() {
-    return this.httpClient.post(this.baseUrl + 'server/convert-bookmarks', {});
+  convertMedia() {
+    return this.http.post(this.baseUrl + 'server/convert-media', {});
   }
 
-  convertCovers() {
-    return this.httpClient.post(this.baseUrl + 'server/convert-covers', {});
+  bustCache() {
+    return this.http.post(this.baseUrl + 'server/bust-kavitaplus-cache', {});
+  }
+
+  getMediaErrors() {
+    return this.http.get<Array<KavitaMediaError>>(this.baseUrl + 'server/media-errors', {});
+  }
+
+  clearMediaAlerts() {
+    return this.http.post(this.baseUrl + 'server/clear-media-alerts', {});
   }
 }

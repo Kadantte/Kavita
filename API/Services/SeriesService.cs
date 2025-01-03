@@ -1,9 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using API.Comparators;
+using API.Constants;
+using API.Controllers;
 using API.Data;
 using API.Data.Repositories;
 using API.DTOs;
@@ -12,13 +15,19 @@ using API.DTOs.SeriesDetail;
 using API.Entities;
 using API.Entities.Enums;
 using API.Entities.Metadata;
+using API.Extensions;
 using API.Helpers;
 using API.Helpers.Builders;
+using API.Services.Plus;
+using API.Services.Tasks.Scanner.Parser;
 using API.SignalR;
+using EasyCaching.Core;
+using Hangfire;
+using Kavita.Common;
 using Microsoft.Extensions.Logging;
 
 namespace API.Services;
-
+#nullable enable
 
 public interface ISeriesService
 {
@@ -28,6 +37,13 @@ public interface ISeriesService
     Task<bool> DeleteMultipleSeries(IList<int> seriesIds);
     Task<bool> UpdateRelatedSeries(UpdateRelatedSeriesDto dto);
     Task<RelatedSeriesDto> GetRelatedSeries(int userId, int seriesId);
+    Task<string> FormatChapterTitle(int userId, ChapterDto chapter, LibraryType libraryType, bool withHash = true);
+    Task<string> FormatChapterTitle(int userId, Chapter chapter, LibraryType libraryType, bool withHash = true);
+
+    Task<string> FormatChapterTitle(int userId, bool isSpecial, LibraryType libraryType, string chapterRange, string? chapterTitle,
+        bool withHash);
+    Task<string> FormatChapterName(int userId, LibraryType libraryType, bool withHash = false);
+    Task<NextExpectedChapterDto> GetEstimatedChapterCreationDate(int seriesId, int userId);
 }
 
 public class SeriesService : ISeriesService
@@ -36,47 +52,69 @@ public class SeriesService : ISeriesService
     private readonly IEventHub _eventHub;
     private readonly ITaskScheduler _taskScheduler;
     private readonly ILogger<SeriesService> _logger;
+    private readonly IScrobblingService _scrobblingService;
+    private readonly ILocalizationService _localizationService;
 
-    public SeriesService(IUnitOfWork unitOfWork, IEventHub eventHub, ITaskScheduler taskScheduler, ILogger<SeriesService> logger)
+    private readonly NextExpectedChapterDto _emptyExpectedChapter = new NextExpectedChapterDto
+    {
+        ExpectedDate = null,
+        ChapterNumber = 0,
+        VolumeNumber = Parser.LooseLeafVolumeNumber
+    };
+
+    public SeriesService(IUnitOfWork unitOfWork, IEventHub eventHub, ITaskScheduler taskScheduler,
+        ILogger<SeriesService> logger, IScrobblingService scrobblingService, ILocalizationService localizationService)
     {
         _unitOfWork = unitOfWork;
         _eventHub = eventHub;
         _taskScheduler = taskScheduler;
         _logger = logger;
+        _scrobblingService = scrobblingService;
+        _localizationService = localizationService;
     }
 
     /// <summary>
     /// Returns the first chapter for a series to extract metadata from (ie Summary, etc)
     /// </summary>
-    /// <param name="series"></param>
-    /// <param name="isBookLibrary"></param>
+    /// <param name="series">The full series with all volumes and chapters on it</param>
     /// <returns></returns>
-    public static Chapter? GetFirstChapterForMetadata(Series series, bool isBookLibrary)
+    public static Chapter? GetFirstChapterForMetadata(Series series)
     {
-        return series.Volumes.OrderBy(v => v.Number, ChapterSortComparer.Default)
-            .SelectMany(v => v.Chapters.OrderBy(c => float.Parse(c.Number), ChapterSortComparer.Default))
+        var sortedVolumes = series.Volumes
+            .Where(v => v.MinNumber.IsNot(Parser.LooseLeafVolumeNumber))
+            .OrderBy(v => v.MinNumber);
+        var minVolumeNumber = sortedVolumes.MinBy(v => v.MinNumber);
+
+
+        var allChapters = series.Volumes
+            .SelectMany(v => v.Chapters.OrderBy(c => c.MinNumber, ChapterSortComparerDefaultLast.Default))
+            .ToList();
+        var minChapter = allChapters
             .FirstOrDefault();
+
+        if (minVolumeNumber != null && minChapter != null &&
+            (minChapter.MinNumber >= minVolumeNumber.MinNumber || minChapter.MinNumber.Is(Parser.DefaultChapterNumber)))
+        {
+            return minVolumeNumber.Chapters.MinBy(c => c.MinNumber, ChapterSortComparerDefaultLast.Default);
+        }
+
+        return minChapter;
     }
 
+    /// <summary>
+    /// Updates the Series Metadata.
+    /// </summary>
+    /// <param name="updateSeriesMetadataDto"></param>
+    /// <returns></returns>
     public async Task<bool> UpdateSeriesMetadata(UpdateSeriesMetadataDto updateSeriesMetadataDto)
     {
         try
         {
             var seriesId = updateSeriesMetadataDto.SeriesMetadata.SeriesId;
-            var series = await _unitOfWork.SeriesRepository.GetSeriesByIdAsync(seriesId);
+            var series = await _unitOfWork.SeriesRepository.GetSeriesByIdAsync(seriesId, SeriesIncludes.Metadata);
             if (series == null) return false;
-            var allCollectionTags = (await _unitOfWork.CollectionTagRepository.GetAllTagsAsync()).ToList();
-            var allGenres = (await _unitOfWork.GenreRepository.GetAllGenresAsync()).ToList();
-            var allPeople = (await _unitOfWork.PersonRepository.GetAllPeople()).ToList();
-            var allTags = (await _unitOfWork.TagRepository.GetAllTagsAsync()).ToList();
 
             series.Metadata ??= new SeriesMetadataBuilder()
-                .WithCollectionTags(updateSeriesMetadataDto.CollectionTags.Select(dto =>
-                    new CollectionTagBuilder(dto.Title)
-                        .WithId(dto.Id)
-                        .WithSummary(dto.Summary)
-                        .WithIsPromoted(dto.Promoted)
-                        .Build()).ToList())
                 .Build();
 
             if (series.Metadata.AgeRating != updateSeriesMetadataDto.SeriesMetadata.AgeRating)
@@ -97,12 +135,6 @@ public class SeriesService : ISeriesService
                 series.Metadata.PublicationStatusLocked = true;
             }
 
-            // This shouldn't be needed post v0.5.3 release
-            if (string.IsNullOrEmpty(series.Metadata.Summary))
-            {
-                series.Metadata.Summary = string.Empty;
-            }
-
             if (string.IsNullOrEmpty(updateSeriesMetadataDto.SeriesMetadata.Summary))
             {
                 updateSeriesMetadataDto.SeriesMetadata.Summary = string.Empty;
@@ -120,69 +152,150 @@ public class SeriesService : ISeriesService
                 series.Metadata.LanguageLocked = true;
             }
 
-            series.Metadata.CollectionTags ??= new List<CollectionTag>();
-            UpdateCollectionsList(updateSeriesMetadataDto.CollectionTags, series, allCollectionTags, (tag) =>
+            if (string.IsNullOrEmpty(updateSeriesMetadataDto.SeriesMetadata?.WebLinks))
             {
-                series.Metadata.CollectionTags.Add(tag);
-            });
-
-            series.Metadata.Genres ??= new List<Genre>();
-            GenreHelper.UpdateGenreList(updateSeriesMetadataDto.SeriesMetadata?.Genres, series, allGenres, (genre) =>
+                series.Metadata.WebLinks = string.Empty;
+            } else
             {
-                series.Metadata.Genres.Add(genre);
-            }, () => series.Metadata.GenresLocked = true);
-
-            series.Metadata.Tags ??= new List<Tag>();
-            TagHelper.UpdateTagList(updateSeriesMetadataDto.SeriesMetadata?.Tags, series, allTags, (tag) =>
-            {
-                series.Metadata.Tags.Add(tag);
-            }, () => series.Metadata.TagsLocked = true);
-
-            void HandleAddPerson(Person person)
-            {
-                PersonHelper.AddPersonIfNotExists(series.Metadata.People, person);
-                allPeople.Add(person);
+                series.Metadata.WebLinks = string.Join(',', updateSeriesMetadataDto.SeriesMetadata?.WebLinks
+                    .Split(',')
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .Select(s => s.Trim())!
+                );
             }
 
-            series.Metadata.People ??= new List<Person>();
-            PersonHelper.UpdatePeopleList(PersonRole.Writer, updateSeriesMetadataDto.SeriesMetadata!.Writers, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.WriterLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Character, updateSeriesMetadataDto.SeriesMetadata.Characters, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.CharacterLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Colorist, updateSeriesMetadataDto.SeriesMetadata.Colorists, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.ColoristLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Editor, updateSeriesMetadataDto.SeriesMetadata.Editors, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.EditorLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Inker, updateSeriesMetadataDto.SeriesMetadata.Inkers, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.InkerLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Letterer, updateSeriesMetadataDto.SeriesMetadata.Letterers, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.LettererLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Penciller, updateSeriesMetadataDto.SeriesMetadata.Pencillers, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.PencillerLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Publisher, updateSeriesMetadataDto.SeriesMetadata.Publishers, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.PublisherLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.Translator, updateSeriesMetadataDto.SeriesMetadata.Translators, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.TranslatorLocked = true);
-            PersonHelper.UpdatePeopleList(PersonRole.CoverArtist, updateSeriesMetadataDto.SeriesMetadata.CoverArtists, series, allPeople,
-                HandleAddPerson,  () => series.Metadata.CoverArtistLocked = true);
 
-            series.Metadata.AgeRatingLocked = updateSeriesMetadataDto.SeriesMetadata.AgeRatingLocked;
-            series.Metadata.PublicationStatusLocked = updateSeriesMetadataDto.SeriesMetadata.PublicationStatusLocked;
-            series.Metadata.LanguageLocked = updateSeriesMetadataDto.SeriesMetadata.LanguageLocked;
-            series.Metadata.GenresLocked = updateSeriesMetadataDto.SeriesMetadata.GenresLocked;
-            series.Metadata.TagsLocked = updateSeriesMetadataDto.SeriesMetadata.TagsLocked;
-            series.Metadata.CharacterLocked = updateSeriesMetadataDto.SeriesMetadata.CharactersLocked;
-            series.Metadata.ColoristLocked = updateSeriesMetadataDto.SeriesMetadata.ColoristsLocked;
-            series.Metadata.EditorLocked = updateSeriesMetadataDto.SeriesMetadata.EditorsLocked;
-            series.Metadata.InkerLocked = updateSeriesMetadataDto.SeriesMetadata.InkersLocked;
-            series.Metadata.LettererLocked = updateSeriesMetadataDto.SeriesMetadata.LetterersLocked;
-            series.Metadata.PencillerLocked = updateSeriesMetadataDto.SeriesMetadata.PencillersLocked;
-            series.Metadata.PublisherLocked = updateSeriesMetadataDto.SeriesMetadata.PublishersLocked;
-            series.Metadata.TranslatorLocked = updateSeriesMetadataDto.SeriesMetadata.TranslatorsLocked;
-            series.Metadata.CoverArtistLocked = updateSeriesMetadataDto.SeriesMetadata.CoverArtistsLocked;
-            series.Metadata.WriterLocked = updateSeriesMetadataDto.SeriesMetadata.WritersLocked;
-            series.Metadata.SummaryLocked = updateSeriesMetadataDto.SeriesMetadata.SummaryLocked;
-            series.Metadata.ReleaseYearLocked = updateSeriesMetadataDto.SeriesMetadata.ReleaseYearLocked;
+            if (updateSeriesMetadataDto.SeriesMetadata?.Genres != null &&
+                updateSeriesMetadataDto.SeriesMetadata.Genres.Count != 0)
+            {
+                var allGenres = (await _unitOfWork.GenreRepository.GetAllGenresByNamesAsync(updateSeriesMetadataDto.SeriesMetadata.Genres.Select(t => Parser.Normalize(t.Title)))).ToList();
+                series.Metadata.Genres ??= new List<Genre>();
+                GenreHelper.UpdateGenreList(updateSeriesMetadataDto.SeriesMetadata?.Genres, series, allGenres, genre =>
+                {
+                    series.Metadata.Genres.Add(genre);
+                }, () => series.Metadata.GenresLocked = true);
+            }
+            else
+            {
+                series.Metadata.Genres = new List<Genre>();
+            }
+
+
+            if (updateSeriesMetadataDto.SeriesMetadata?.Tags is {Count: > 0})
+            {
+                var allTags = (await _unitOfWork.TagRepository
+                    .GetAllTagsByNameAsync(updateSeriesMetadataDto.SeriesMetadata.Tags.Select(t => Parser.Normalize(t.Title))))
+                    .ToList();
+                series.Metadata.Tags ??= new List<Tag>();
+                TagHelper.UpdateTagList(updateSeriesMetadataDto.SeriesMetadata?.Tags, series, allTags, tag =>
+                {
+                    series.Metadata.Tags.Add(tag);
+                }, () => series.Metadata.TagsLocked = true);
+            }
+            else
+            {
+                series.Metadata.Tags = new List<Tag>();
+            }
+
+            if (updateSeriesMetadataDto.SeriesMetadata != null)
+            {
+                if (PersonHelper.HasAnyPeople(updateSeriesMetadataDto.SeriesMetadata))
+                {
+                    series.Metadata.People ??= new List<SeriesMetadataPeople>();
+
+                    // Writers
+                    if (!series.Metadata.WriterLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Writers, PersonRole.Writer);
+                    }
+
+                    // Cover Artists
+                    if (!series.Metadata.CoverArtistLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.CoverArtists, PersonRole.CoverArtist);
+                    }
+
+                    // Colorists
+                    if (!series.Metadata.ColoristLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Colorists, PersonRole.Colorist);
+                    }
+
+                    // Editors
+                    if (!series.Metadata.EditorLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Editors, PersonRole.Editor);
+                    }
+
+                    // Inkers
+                    if (!series.Metadata.InkerLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Inkers, PersonRole.Inker);
+                    }
+
+                    // Letterers
+                    if (!series.Metadata.LettererLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Letterers, PersonRole.Letterer);
+                    }
+
+                    // Pencillers
+                    if (!series.Metadata.PencillerLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Pencillers, PersonRole.Penciller);
+                    }
+
+                    // Publishers
+                    if (!series.Metadata.PublisherLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Publishers, PersonRole.Publisher);
+                    }
+
+                    // Imprints
+                    if (!series.Metadata.ImprintLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Imprints, PersonRole.Imprint);
+                    }
+
+                    // Teams
+                    if (!series.Metadata.TeamLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Teams, PersonRole.Team);
+                    }
+
+                    // Locations
+                    if (!series.Metadata.LocationLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Locations, PersonRole.Location);
+                    }
+
+                    // Translators
+                    if (!series.Metadata.TranslatorLocked)
+                    {
+                        await HandlePeopleUpdateAsync(series.Metadata, updateSeriesMetadataDto.SeriesMetadata.Translators, PersonRole.Translator);
+                    }
+
+                }
+
+                series.Metadata.AgeRatingLocked = updateSeriesMetadataDto.SeriesMetadata.AgeRatingLocked;
+                series.Metadata.PublicationStatusLocked = updateSeriesMetadataDto.SeriesMetadata.PublicationStatusLocked;
+                series.Metadata.LanguageLocked = updateSeriesMetadataDto.SeriesMetadata.LanguageLocked;
+                series.Metadata.GenresLocked = updateSeriesMetadataDto.SeriesMetadata.GenresLocked;
+                series.Metadata.TagsLocked = updateSeriesMetadataDto.SeriesMetadata.TagsLocked;
+                series.Metadata.CharacterLocked = updateSeriesMetadataDto.SeriesMetadata.CharacterLocked;
+                series.Metadata.ColoristLocked = updateSeriesMetadataDto.SeriesMetadata.ColoristLocked;
+                series.Metadata.EditorLocked = updateSeriesMetadataDto.SeriesMetadata.EditorLocked;
+                series.Metadata.InkerLocked = updateSeriesMetadataDto.SeriesMetadata.InkerLocked;
+                series.Metadata.ImprintLocked = updateSeriesMetadataDto.SeriesMetadata.ImprintLocked;
+                series.Metadata.LettererLocked = updateSeriesMetadataDto.SeriesMetadata.LettererLocked;
+                series.Metadata.PencillerLocked = updateSeriesMetadataDto.SeriesMetadata.PencillerLocked;
+                series.Metadata.PublisherLocked = updateSeriesMetadataDto.SeriesMetadata.PublisherLocked;
+                series.Metadata.TranslatorLocked = updateSeriesMetadataDto.SeriesMetadata.TranslatorLocked;
+                series.Metadata.CoverArtistLocked = updateSeriesMetadataDto.SeriesMetadata.CoverArtistLocked;
+                series.Metadata.WriterLocked = updateSeriesMetadataDto.SeriesMetadata.WriterLocked;
+                series.Metadata.SummaryLocked = updateSeriesMetadataDto.SeriesMetadata.SummaryLocked;
+                series.Metadata.ReleaseYearLocked = updateSeriesMetadataDto.SeriesMetadata.ReleaseYearLocked;
+            }
 
             if (!_unitOfWork.HasChanges())
             {
@@ -192,24 +305,16 @@ public class SeriesService : ISeriesService
             await _unitOfWork.CommitAsync();
 
             // Trigger code to cleanup tags, collections, people, etc
-            await _taskScheduler.CleanupDbEntries();
-
-            if (updateSeriesMetadataDto.CollectionTags != null)
+            try
             {
-                foreach (var tag in updateSeriesMetadataDto.CollectionTags)
-                {
-                    await _eventHub.SendMessageAsync(MessageFactory.SeriesAddedToCollection,
-                        MessageFactory.SeriesAddedToCollectionEvent(tag.Id,
-                            updateSeriesMetadataDto.SeriesMetadata.SeriesId), false);
-                }
-
-                await _eventHub.SendMessageAsync(MessageFactory.ScanSeries,
-                    MessageFactory.ScanSeriesEvent(series.LibraryId, series.Id, series.Name), false);
-
-                await _unitOfWork.CollectionTagRepository.RemoveTagsWithoutSeries();
-
-                return true;
+                await _taskScheduler.CleanupDbEntries();
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "There was an issue cleaning up DB entries. This may happen if Komf is spamming updates. Nightly cleanup will work");
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -220,45 +325,92 @@ public class SeriesService : ISeriesService
         return false;
     }
 
-
-    public static void UpdateCollectionsList(ICollection<CollectionTagDto>? tags, Series series, IReadOnlyCollection<CollectionTag> allTags,
-        Action<CollectionTag> handleAdd)
+    /// <summary>
+    /// Exclusively for Series Update API
+    /// </summary>
+    /// <param name="metadata"></param>
+    /// <param name="peopleDtos"></param>
+    /// <param name="role"></param>
+    private async Task HandlePeopleUpdateAsync(SeriesMetadata metadata, ICollection<PersonDto> peopleDtos, PersonRole role)
     {
-        // TODO: Move UpdateCollectionsList to a helper so we can easily test
-        if (tags == null) return;
-        // I want a union of these 2 lists. Return only elements that are in both lists, but the list types are different
-        var existingTags = series.Metadata.CollectionTags.ToList();
-        foreach (var existing in existingTags)
+        // Normalize all names from the DTOs
+        var normalizedNames = peopleDtos
+            .Select(p => Parser.Normalize(p.Name))
+            .Distinct()
+            .ToList();
+
+        // Bulk select people who already exist in the database
+        var existingPeople = await _unitOfWork.PersonRepository.GetPeopleByNames(normalizedNames);
+
+        // Use a dictionary for quick lookups
+        var existingPeopleDictionary = existingPeople.DistinctBy(p => p.NormalizedName).ToDictionary(p => p.NormalizedName, p => p);
+
+        // List to track people that will be added to the metadata
+        var peopleToAdd = new List<Person>();
+
+        foreach (var personDto in peopleDtos)
         {
-            if (tags.SingleOrDefault(t => t.Id == existing.Id) == null)
+            var normalizedPersonName = Parser.Normalize(personDto.Name);
+
+            // Check if the person exists in the dictionary
+            if (existingPeopleDictionary.TryGetValue(normalizedPersonName, out _)) continue;
+
+            // Person doesn't exist, so create a new one
+            var newPerson = new Person
             {
-                // Remove tag
-                series.Metadata.CollectionTags.Remove(existing);
-            }
+                Name = personDto.Name,
+                NormalizedName = normalizedPersonName
+            };
+
+            peopleToAdd.Add(newPerson);
+            existingPeopleDictionary[normalizedPersonName] = newPerson;
         }
 
-        // At this point, all tags that aren't in dto have been removed.
-        foreach (var tag in tags)
+        // Add any new people to the database in bulk
+        if (peopleToAdd.Count != 0)
         {
-            var existingTag = allTags.SingleOrDefault(t => t.Title == tag.Title);
-            if (existingTag != null)
+            _unitOfWork.PersonRepository.Attach(peopleToAdd);
+        }
+
+        // Now that we have all the people (new and existing), update the SeriesMetadataPeople
+        UpdateSeriesMetadataPeople(metadata, metadata.People, existingPeopleDictionary.Values, role);
+    }
+
+    private static void UpdateSeriesMetadataPeople(SeriesMetadata metadata, ICollection<SeriesMetadataPeople> metadataPeople, IEnumerable<Person> people, PersonRole role)
+    {
+        var peopleToAdd = people.ToList();
+
+        // Remove any people in the existing metadataPeople for this role that are no longer present in the input list
+        var peopleToRemove = metadataPeople
+            .Where(mp => mp.Role == role && peopleToAdd.TrueForAll(p => p.NormalizedName != mp.Person.NormalizedName))
+            .ToList();
+
+        foreach (var personToRemove in peopleToRemove)
+        {
+            metadataPeople.Remove(personToRemove);
+        }
+
+        // Add new people for this role if they don't already exist
+        foreach (var person in peopleToAdd)
+        {
+            var existingPersonEntry = metadataPeople
+                .FirstOrDefault(mp => mp.Person.NormalizedName == person.NormalizedName && mp.Role == role);
+
+            if (existingPersonEntry == null)
             {
-                if (series.Metadata.CollectionTags.All(t => t.Title != tag.Title))
+                metadataPeople.Add(new SeriesMetadataPeople
                 {
-                    handleAdd(existingTag);
-                }
-            }
-            else
-            {
-                // Add new tag
-                handleAdd(new CollectionTagBuilder(tag.Title)
-                    .WithId(tag.Id)
-                    .WithSummary(tag.Summary)
-                    .WithIsPromoted(tag.Promoted)
-                    .Build());
+                    PersonId = person.Id,
+                    Person = person,
+                    SeriesMetadataId = metadata.Id,
+                    SeriesMetadata = metadata,
+                    Role = role
+                });
             }
         }
     }
+
+
 
     /// <summary>
     ///
@@ -279,8 +431,8 @@ public class SeriesService : ISeriesService
             new AppUserRating();
         try
         {
-            userRating.Rating = Math.Clamp(updateSeriesRatingDto.UserRating, 0, 5);
-            userRating.Review = updateSeriesRatingDto.UserReview;
+            userRating.Rating = Math.Clamp(updateSeriesRatingDto.UserRating, 0f, 5f);
+            userRating.HasBeenRated = true;
             userRating.SeriesId = updateSeriesRatingDto.SeriesId;
 
             if (userRating.Id == 0)
@@ -291,7 +443,13 @@ public class SeriesService : ISeriesService
 
             _unitOfWork.UserRepository.Update(user);
 
-            if (!_unitOfWork.HasChanges() || await _unitOfWork.CommitAsync()) return true;
+            if (!_unitOfWork.HasChanges() || await _unitOfWork.CommitAsync())
+            {
+                BackgroundJob.Enqueue(() =>
+                    _scrobblingService.ScrobbleRatingUpdate(user.Id, updateSeriesRatingDto.SeriesId,
+                        userRating.Rating));
+                return true;
+            }
         }
         catch (Exception ex)
         {
@@ -317,7 +475,11 @@ public class SeriesService : ISeriesService
                 allChapterIds.AddRange(mapping.Value);
             }
 
+            // NOTE: This isn't getting all the people and whatnot currently
             var series = await _unitOfWork.SeriesRepository.GetSeriesByIdsAsync(seriesIds);
+
+            _unitOfWork.SeriesRepository.Remove(series);
+
             var libraryIds = series.Select(s => s.LibraryId);
             var libraries = await _unitOfWork.LibraryRepository.GetLibraryForIdsAsync(libraryIds);
             foreach (var library in libraries)
@@ -325,11 +487,8 @@ public class SeriesService : ISeriesService
                 library.UpdateLastModified();
                 _unitOfWork.LibraryRepository.Update(library);
             }
+            await _unitOfWork.CommitAsync();
 
-            _unitOfWork.SeriesRepository.Remove(series);
-
-
-            if (!_unitOfWork.HasChanges() || !await _unitOfWork.CommitAsync()) return true;
 
             foreach (var s in series)
             {
@@ -338,16 +497,15 @@ public class SeriesService : ISeriesService
             }
 
             await _unitOfWork.AppUserProgressRepository.CleanupAbandonedChapters();
-            await _unitOfWork.CollectionTagRepository.RemoveTagsWithoutSeries();
+            await _unitOfWork.CollectionTagRepository.RemoveCollectionsWithoutSeries();
             _taskScheduler.CleanupChapters(allChapterIds.ToArray());
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "There was an issue when trying to delete multiple series");
             return false;
         }
-
-        return true;
     }
 
     /// <summary>
@@ -359,89 +517,84 @@ public class SeriesService : ISeriesService
     public async Task<SeriesDetailDto> GetSeriesDetail(int seriesId, int userId)
     {
         var series = await _unitOfWork.SeriesRepository.GetSeriesDtoByIdAsync(seriesId, userId);
+        if (series == null) throw new KavitaException(await _localizationService.Translate(userId, "series-doesnt-exist"));
         var libraryIds = _unitOfWork.LibraryRepository.GetLibraryIdsForUserIdAsync(userId);
         if (!libraryIds.Contains(series.LibraryId))
-            throw new UnauthorizedAccessException("User does not have access to the library this series belongs to");
+            throw new UnauthorizedAccessException("user-no-access-library-from-series");
 
         var user = await _unitOfWork.UserRepository.GetUserByIdAsync(userId);
         if (user!.AgeRestriction != AgeRating.NotApplicable)
         {
             var seriesMetadata = await _unitOfWork.SeriesRepository.GetSeriesMetadata(seriesId);
             if (seriesMetadata!.AgeRating > user.AgeRestriction)
-                throw new UnauthorizedAccessException("User is not allowed to view this series due to age restrictions");
+                throw new UnauthorizedAccessException("series-restricted-age-restriction");
         }
 
+
         var libraryType = await _unitOfWork.LibraryRepository.GetLibraryTypeAsync(series.LibraryId);
-        var volumes = (await _unitOfWork.VolumeRepository.GetVolumesDtoAsync(seriesId, userId))
-            .OrderBy(v => Tasks.Scanner.Parser.Parser.MinNumberFromRange(v.Name))
-            .ToList();
+        var bookTreatment = libraryType is LibraryType.Book or LibraryType.LightNovel;
+        var volumeLabel = await _localizationService.Translate(userId, "volume-num", string.Empty);
+        var volumes = await _unitOfWork.VolumeRepository.GetVolumesDtoAsync(seriesId, userId);
 
         // For books, the Name of the Volume is remapped to the actual name of the book, rather than Volume number.
         var processedVolumes = new List<VolumeDto>();
-        if (libraryType == LibraryType.Book)
+        foreach (var volume in volumes)
         {
-            foreach (var volume in volumes)
+            if (volume.IsLooseLeaf() || volume.IsSpecial())
             {
-                var firstChapter = volume.Chapters.First();
-                // On Books, skip volumes that are specials, since these will be shown
-                if (firstChapter.IsSpecial) continue;
-                RenameVolumeName(firstChapter, volume, libraryType);
+                continue;
+            }
+
+            if (RenameVolumeName(volume, libraryType, volumeLabel) || (bookTreatment && !volume.IsSpecial()))
+            {
                 processedVolumes.Add(volume);
             }
         }
-        else
-        {
-            processedVolumes = volumes.Where(v => v.Number > 0).ToList();
-            processedVolumes.ForEach(v => v.Name = $"Volume {v.Name}");
-        }
 
         var specials = new List<ChapterDto>();
-        var chapters = volumes.SelectMany(v => v.Chapters.Select(c =>
-        {
-            if (v.Number == 0) return c;
-            c.VolumeTitle = v.Name;
-            return c;
-        }).OrderBy(c => float.Parse(c.Number), ChapterSortComparer.Default)).ToList();
+        // Why isn't this doing a check if chapter is not special as it wont get included
+        var chapters = volumes
+            .SelectMany(v => v.Chapters
+                .Select(c =>
+                {
+                    if (v.IsLooseLeaf() || v.IsSpecial()) return c;
+                    c.VolumeTitle = v.Name;
+                    return c;
+                })
+                .OrderBy(c => c.SortOrder))
+                .ToList();
 
         foreach (var chapter in chapters)
         {
-            chapter.Title = FormatChapterTitle(chapter, libraryType);
-            if (!chapter.IsSpecial) continue;
+            chapter.Title = await FormatChapterTitle(userId, chapter, libraryType);
 
-            if (!string.IsNullOrEmpty(chapter.TitleName)) chapter.Title = chapter.TitleName;
+            if (!chapter.IsSpecial) continue;
             specials.Add(chapter);
         }
 
-        // Don't show chapter 0 (aka single volume chapters) in the Chapters tab or books that are just single numbers (they show as volumes)
-        IEnumerable<ChapterDto> retChapters;
-        if (libraryType == LibraryType.Book)
-        {
-            retChapters = Array.Empty<ChapterDto>();
-        } else
-        {
-            retChapters = chapters
-                .Where(ShouldIncludeChapter);
-        }
+        // Don't show chapter -100000 (aka single volume chapters) in the Chapters tab or books that are just single numbers (they show as volumes)
+        IEnumerable<ChapterDto> retChapters = bookTreatment ? Array.Empty<ChapterDto>() : chapters.Where(ShouldIncludeChapter);
 
         var storylineChapters = volumes
-            .Where(v => v.Number == 0)
+            .WhereLooseLeaf()
             .SelectMany(v => v.Chapters.Where(c => !c.IsSpecial))
-            .OrderBy(c => float.Parse(c.Number), ChapterSortComparer.Default)
+            .OrderBy(c => c.SortOrder)
             .ToList();
 
         // When there's chapters without a volume number revert to chapter sorting only as opposed to volume then chapter
-        if (storylineChapters.Any()) {
-            retChapters = retChapters.OrderBy(c => float.Parse(c.Number), ChapterSortComparer.Default);
+        if (storylineChapters.Count > 0) {
+            retChapters = retChapters.OrderBy(c => c.SortOrder, ChapterSortComparerDefaultLast.Default);
         }
 
-        return new SeriesDetailDto()
+        return new SeriesDetailDto
         {
             Specials = specials,
             Chapters = retChapters,
             Volumes = processedVolumes,
             StorylineChapters = storylineChapters,
             TotalCount = chapters.Count,
-            UnreadCount = chapters.Count(c => c.Pages > 0 && c.PagesRead < c.Pages)
+            UnreadCount = chapters.Count(c => c.Pages > 0 && c.PagesRead < c.Pages),
+            // TODO: See if we can get the ContinueFrom here
         };
     }
 
@@ -452,70 +605,102 @@ public class SeriesService : ISeriesService
     /// <returns></returns>
     private static bool ShouldIncludeChapter(ChapterDto chapter)
     {
-        return !chapter.IsSpecial && !chapter.Number.Equals(Tasks.Scanner.Parser.Parser.DefaultChapter);
+        return !chapter.IsSpecial && chapter.MinNumber.IsNot(Parser.DefaultChapterNumber);
     }
 
-    public static void RenameVolumeName(ChapterDto firstChapter, VolumeDto volume, LibraryType libraryType)
+    /// <summary>
+    /// Should the volume be included and if so, this renames
+    /// </summary>
+    /// <param name="volume"></param>
+    /// <param name="libraryType"></param>
+    /// <param name="volumeLabel"></param>
+    /// <returns></returns>
+    public static bool RenameVolumeName(VolumeDto volume, LibraryType libraryType, string volumeLabel = "Volume")
     {
-        if (libraryType == LibraryType.Book)
+        if (libraryType is LibraryType.Book or LibraryType.LightNovel)
         {
+            var firstChapter = volume.Chapters.First();
+            // On Books, skip volumes that are specials, since these will be shown
+            // if (firstChapter.IsSpecial)
+            // {
+            //     // Some books can be SP marker and also position of 0, this will trick Kavita into rendering it as part of a non-special volume
+            //     // We need to rename the entity so that it renders out correctly
+            //     return false;
+            // }
             if (string.IsNullOrEmpty(firstChapter.TitleName))
             {
-                if (firstChapter.Range.Equals(Tasks.Scanner.Parser.Parser.DefaultVolume)) return;
+                if (firstChapter.Range.Equals(Parser.LooseLeafVolume)) return false;
                 var title = Path.GetFileNameWithoutExtension(firstChapter.Range);
-                if (string.IsNullOrEmpty(title)) return;
-                volume.Name += $" - {title}";
+                if (string.IsNullOrEmpty(title)) return false;
+                volume.Name += $" - {title}"; // OPDS smart list 7 (just pdfs) triggered this
             }
-            else
+            else if (!volume.IsLooseLeaf())
             {
-                volume.Name += $" - {firstChapter.TitleName}";
+                // If the titleName has Volume inside it, let's just send that back?
+                volume.Name = firstChapter.TitleName;
             }
 
-            return;
+            return !firstChapter.IsSpecial;
         }
 
-        volume.Name = $"Volume {volume.Name}";
+        volume.Name = $"{volumeLabel.Trim()} {volume.Name}".Trim();
+        return true;
     }
 
 
-    private static string FormatChapterTitle(bool isSpecial, LibraryType libraryType, string? chapterTitle, bool withHash)
+    public async Task<string> FormatChapterTitle(int userId, bool isSpecial, LibraryType libraryType, string chapterRange, string? chapterTitle, bool withHash)
     {
-        if (string.IsNullOrEmpty(chapterTitle)) throw new ArgumentException("Chapter Title cannot be null");
+        if (string.IsNullOrEmpty(chapterTitle) && (isSpecial || libraryType == LibraryType.Book)) throw new ArgumentException("Chapter Title cannot be null");
 
         if (isSpecial)
         {
-            return Tasks.Scanner.Parser.Parser.CleanSpecialTitle(chapterTitle);
+            return Parser.CleanSpecialTitle(chapterTitle!);
         }
 
         var hashSpot = withHash ? "#" : string.Empty;
-        return libraryType switch
+        var baseChapter = libraryType switch
         {
-            LibraryType.Book => $"Book {chapterTitle}",
-            LibraryType.Comic => $"Issue {hashSpot}{chapterTitle}",
-            LibraryType.Manga => $"Chapter {chapterTitle}",
-            _ => "Chapter "
+            LibraryType.Book => await _localizationService.Translate(userId, "book-num", chapterTitle!),
+            LibraryType.LightNovel => await _localizationService.Translate(userId, "book-num", chapterRange),
+            LibraryType.Comic => await _localizationService.Translate(userId, "issue-num", hashSpot, chapterRange),
+            LibraryType.ComicVine => await _localizationService.Translate(userId, "issue-num", hashSpot, chapterRange),
+            LibraryType.Manga => await _localizationService.Translate(userId, "chapter-num", chapterRange),
+            LibraryType.Image => await _localizationService.Translate(userId, "chapter-num", chapterRange),
+            _ => await _localizationService.Translate(userId, "chapter-num", ' ')
         };
-    }
 
-    public static string FormatChapterTitle(ChapterDto chapter, LibraryType libraryType, bool withHash = true)
-    {
-        return FormatChapterTitle(chapter.IsSpecial, libraryType, chapter.Title, withHash);
-    }
-
-    public static string FormatChapterTitle(Chapter chapter, LibraryType libraryType, bool withHash = true)
-    {
-        return FormatChapterTitle(chapter.IsSpecial, libraryType, chapter.Title, withHash);
-    }
-
-    public static string FormatChapterName(LibraryType libraryType, bool withHash = false)
-    {
-        return libraryType switch
+        if (!string.IsNullOrEmpty(chapterTitle) && libraryType != LibraryType.Book && chapterTitle != chapterRange)
         {
-            LibraryType.Manga => "Chapter",
-            LibraryType.Comic => withHash ? "Issue #" : "Issue",
-            LibraryType.Book => "Book",
-            _ => "Chapter"
-        };
+            baseChapter += " - " + chapterTitle;
+        }
+
+
+        return baseChapter;
+    }
+
+    public async Task<string> FormatChapterTitle(int userId, ChapterDto chapter, LibraryType libraryType, bool withHash = true)
+    {
+        return await FormatChapterTitle(userId, chapter.IsSpecial, libraryType, chapter.Range, chapter.Title, withHash);
+    }
+
+    public async Task<string> FormatChapterTitle(int userId, Chapter chapter, LibraryType libraryType, bool withHash = true)
+    {
+        return await FormatChapterTitle(userId, chapter.IsSpecial, libraryType, chapter.Range, chapter.Title, withHash);
+    }
+
+    // TODO: Refactor this out and use FormatChapterTitle instead across library
+    public async Task<string> FormatChapterName(int userId, LibraryType libraryType, bool withHash = false)
+    {
+        var hashSpot = withHash ? "#" : string.Empty;
+        return (libraryType switch
+        {
+            LibraryType.Book => await _localizationService.Translate(userId, "book-num", string.Empty),
+            LibraryType.LightNovel => await _localizationService.Translate(userId, "book-num", string.Empty),
+            LibraryType.Comic => await _localizationService.Translate(userId, "issue-num", hashSpot, string.Empty),
+            LibraryType.ComicVine => await _localizationService.Translate(userId, "issue-num", hashSpot, string.Empty),
+            LibraryType.Manga => await _localizationService.Translate(userId, "chapter-num", string.Empty),
+            _ => await _localizationService.Translate(userId, "chapter-num", ' ')
+        }).Trim();
     }
 
     /// <summary>
@@ -530,7 +715,7 @@ public class SeriesService : ISeriesService
     }
 
     /// <summary>
-    /// Update the relations attached to the Series. Does not generate associated Sequel/Prequel pairs on target series.
+    /// Update the relations attached to the Series. Generates associated Sequel/Prequel pairs on target series.
     /// </summary>
     /// <param name="dto"></param>
     /// <returns></returns>
@@ -548,12 +733,88 @@ public class SeriesService : ISeriesService
         UpdateRelationForKind(dto.AlternativeSettings, series.Relations.Where(r => r.RelationKind == RelationKind.AlternativeSetting).ToList(), series, RelationKind.AlternativeSetting);
         UpdateRelationForKind(dto.AlternativeVersions, series.Relations.Where(r => r.RelationKind == RelationKind.AlternativeVersion).ToList(), series, RelationKind.AlternativeVersion);
         UpdateRelationForKind(dto.Doujinshis, series.Relations.Where(r => r.RelationKind == RelationKind.Doujinshi).ToList(), series, RelationKind.Doujinshi);
-        UpdateRelationForKind(dto.Prequels, series.Relations.Where(r => r.RelationKind == RelationKind.Prequel).ToList(), series, RelationKind.Prequel);
-        UpdateRelationForKind(dto.Sequels, series.Relations.Where(r => r.RelationKind == RelationKind.Sequel).ToList(), series, RelationKind.Sequel);
         UpdateRelationForKind(dto.Editions, series.Relations.Where(r => r.RelationKind == RelationKind.Edition).ToList(), series, RelationKind.Edition);
+        UpdateRelationForKind(dto.Annuals, series.Relations.Where(r => r.RelationKind == RelationKind.Annual).ToList(), series, RelationKind.Annual);
+
+        await UpdatePrequelSequelRelations(dto.Prequels, series, RelationKind.Prequel);
+        await UpdatePrequelSequelRelations(dto.Sequels, series, RelationKind.Sequel);
 
         if (!_unitOfWork.HasChanges()) return true;
         return await _unitOfWork.CommitAsync();
+    }
+
+    /// <summary>
+    /// Updates Prequel/Sequel relations and creates reciprocal relations on target series.
+    /// </summary>
+    /// <param name="targetSeriesIds">List of target series IDs</param>
+    /// <param name="series">The current series being updated</param>
+    /// <param name="kind">The relation kind (Prequel or Sequel)</param>
+    private async Task UpdatePrequelSequelRelations(ICollection<int> targetSeriesIds, Series series, RelationKind kind)
+    {
+        var existingRelations = series.Relations.Where(r => r.RelationKind == kind).ToList();
+
+        // Remove relations that are not in the new list
+        foreach (var relation in existingRelations.Where(relation => !targetSeriesIds.Contains(relation.TargetSeriesId)))
+        {
+            series.Relations.Remove(relation);
+            await RemoveReciprocalRelation(series.Id, relation.TargetSeriesId, GetOppositeRelationKind(kind));
+        }
+
+        // Add new relations
+        foreach (var targetSeriesId in targetSeriesIds)
+        {
+            if (series.Relations.Any(r => r.RelationKind == kind && r.TargetSeriesId == targetSeriesId))
+                continue;
+
+            series.Relations.Add(new SeriesRelation
+            {
+                Series = series,
+                SeriesId = series.Id,
+                TargetSeriesId = targetSeriesId,
+                RelationKind = kind
+            });
+
+            await AddReciprocalRelation(series.Id, targetSeriesId, GetOppositeRelationKind(kind));
+        }
+
+        _unitOfWork.SeriesRepository.Update(series);
+    }
+
+    private static RelationKind GetOppositeRelationKind(RelationKind kind)
+    {
+        return kind == RelationKind.Prequel ? RelationKind.Sequel : RelationKind.Prequel;
+    }
+
+    private async Task AddReciprocalRelation(int sourceSeriesId, int targetSeriesId, RelationKind kind)
+    {
+        var targetSeries = await _unitOfWork.SeriesRepository.GetSeriesByIdAsync(targetSeriesId, SeriesIncludes.Related);
+        if (targetSeries == null) return;
+
+        if (targetSeries.Relations.Any(r => r.RelationKind == kind && r.TargetSeriesId == sourceSeriesId))
+            return;
+
+        targetSeries.Relations.Add(new SeriesRelation
+        {
+            Series = targetSeries,
+            SeriesId = targetSeriesId,
+            TargetSeriesId = sourceSeriesId,
+            RelationKind = kind
+        });
+
+        _unitOfWork.SeriesRepository.Update(targetSeries);
+    }
+
+    private async Task RemoveReciprocalRelation(int sourceSeriesId, int targetSeriesId, RelationKind kind)
+    {
+        var targetSeries = await _unitOfWork.SeriesRepository.GetSeriesByIdAsync(targetSeriesId, SeriesIncludes.Related);
+        if (targetSeries == null) return;
+
+        var relationToRemove = targetSeries.Relations.FirstOrDefault(r => r.RelationKind == kind && r.TargetSeriesId == sourceSeriesId);
+        if (relationToRemove != null)
+        {
+            targetSeries.Relations.Remove(relationToRemove);
+            _unitOfWork.SeriesRepository.Update(targetSeries);
+        }
     }
 
 
@@ -580,7 +841,7 @@ public class SeriesService : ISeriesService
                     r.RelationKind == kind && r.TargetSeriesId == targetSeriesId) !=
                 null) continue;
 
-            series.Relations.Add(new SeriesRelation()
+            series.Relations.Add(new SeriesRelation
             {
                 Series = series,
                 SeriesId = series.Id,
@@ -589,5 +850,125 @@ public class SeriesService : ISeriesService
             });
             _unitOfWork.SeriesRepository.Update(series);
         }
+    }
+
+    public async Task<NextExpectedChapterDto> GetEstimatedChapterCreationDate(int seriesId, int userId)
+    {
+        var series = await _unitOfWork.SeriesRepository.GetSeriesByIdAsync(seriesId, SeriesIncludes.Metadata | SeriesIncludes.Library);
+        if (series == null) throw new KavitaException(await _localizationService.Translate(userId, "series-doesnt-exist"));
+        if (!(await _unitOfWork.UserRepository.HasAccessToSeries(userId, seriesId)))
+        {
+            throw new UnauthorizedAccessException("user-no-access-library-from-series");
+        }
+        if (series.Metadata.PublicationStatus is not (PublicationStatus.OnGoing or PublicationStatus.Ended) ||
+            (series.Library.Type is LibraryType.Book or LibraryType.LightNovel))
+        {
+            return _emptyExpectedChapter;
+        }
+
+        const int minimumTimeDeltas = 3;
+        var chapters = _unitOfWork.ChapterRepository.GetChaptersForSeries(seriesId)
+            .Where(c => !c.IsSpecial)
+            .OrderBy(c => c.CreatedUtc)
+            .ToList();
+
+        if (chapters.Count < 3) return _emptyExpectedChapter;
+
+        // Calculate the time differences between consecutive chapters
+        var timeDifferences = new List<TimeSpan>();
+        DateTime? previousChapterTime = null;
+        foreach (var chapter in chapters)
+        {
+            if (previousChapterTime.HasValue && (chapter.CreatedUtc - previousChapterTime.Value) <= TimeSpan.FromHours(1))
+            {
+                continue; // Skip this chapter if it's within an hour of the previous one
+            }
+
+            if ((chapter.CreatedUtc - previousChapterTime ?? TimeSpan.Zero) != TimeSpan.Zero)
+            {
+                timeDifferences.Add(chapter.CreatedUtc - previousChapterTime ?? TimeSpan.Zero);
+            }
+
+            previousChapterTime = chapter.CreatedUtc;
+        }
+
+        if (timeDifferences.Count < minimumTimeDeltas)
+        {
+            return _emptyExpectedChapter;
+        }
+
+        var historicalTimeDifferences = timeDifferences.Select(td => td.TotalDays).ToList();
+
+        if (historicalTimeDifferences.Count < minimumTimeDeltas)
+        {
+            return _emptyExpectedChapter;
+        }
+
+        const double alpha = 0.2; // A smaller alpha will give more weight to recent data, while a larger alpha will smooth the data more.
+        var forecastedTimeDifference = ExponentialSmoothing(historicalTimeDifferences, alpha);
+
+        if (forecastedTimeDifference <= 0)
+        {
+            return _emptyExpectedChapter;
+        }
+
+        // Calculate the forecast for when the next chapter is expected
+        // var nextChapterExpected = chapters.Count > 0
+        //     ? chapters.Max(c => c.CreatedUtc) + TimeSpan.FromDays(forecastedTimeDifference)
+        //     : (DateTime?)null;
+        var lastChapterDate = chapters.Max(c => c.CreatedUtc);
+        var estimatedDate = lastChapterDate.AddDays(forecastedTimeDifference);
+        var nextChapterExpected = estimatedDate.Day > DateTime.DaysInMonth(estimatedDate.Year, estimatedDate.Month)
+            ? new DateTime(estimatedDate.Year, estimatedDate.Month, DateTime.DaysInMonth(estimatedDate.Year, estimatedDate.Month))
+            : estimatedDate;
+
+        // For number and volume number, we need the highest chapter, not the latest created
+        var lastChapter = chapters.MaxBy(c => c.MaxNumber)!;
+        var lastChapterNumber = lastChapter.MaxNumber;
+
+        var lastVolumeNum = chapters.Select(c => c.Volume.MinNumber).Max();
+
+        var result = new NextExpectedChapterDto
+        {
+            ChapterNumber = 0,
+            VolumeNumber = Parser.LooseLeafVolumeNumber,
+            ExpectedDate = nextChapterExpected,
+            Title = string.Empty
+        };
+
+        if (lastChapterNumber > 0)
+        {
+            result.ChapterNumber = (int) Math.Truncate(lastChapterNumber) + 1;
+            result.VolumeNumber = lastChapter.Volume.MinNumber;
+            result.Title = series.Library.Type switch
+            {
+                LibraryType.Manga => await _localizationService.Translate(userId, "chapter-num", result.ChapterNumber),
+                LibraryType.Comic => await _localizationService.Translate(userId, "issue-num", "#", result.ChapterNumber),
+                LibraryType.ComicVine => await _localizationService.Translate(userId, "issue-num", "#", result.ChapterNumber),
+                LibraryType.Book => await _localizationService.Translate(userId, "book-num", result.ChapterNumber),
+                LibraryType.LightNovel => await _localizationService.Translate(userId, "book-num", result.ChapterNumber),
+                _ => await _localizationService.Translate(userId, "chapter-num", result.ChapterNumber)
+            };
+        }
+        else
+        {
+            result.VolumeNumber = lastVolumeNum + 1;
+            result.Title = await _localizationService.Translate(userId, "volume-num", result.VolumeNumber);
+        }
+
+
+        return result;
+    }
+
+    private static double ExponentialSmoothing(IList<double> data, double alpha)
+    {
+        var forecast = data[0];
+
+        foreach (var value in data)
+        {
+            forecast = alpha * value + (1 - alpha) * forecast;
+        }
+
+        return forecast;
     }
 }

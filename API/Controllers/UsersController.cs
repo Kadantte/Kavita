@@ -1,10 +1,12 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using API.Constants;
 using API.Data;
 using API.Data.Repositories;
 using API.DTOs;
 using API.Extensions;
+using API.Services;
 using API.SignalR;
 using AutoMapper;
 using Microsoft.AspNetCore.Authorization;
@@ -12,18 +14,23 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace API.Controllers;
 
+#nullable enable
+
 [Authorize]
 public class UsersController : BaseApiController
 {
     private readonly IUnitOfWork _unitOfWork;
     private readonly IMapper _mapper;
     private readonly IEventHub _eventHub;
+    private readonly ILocalizationService _localizationService;
 
-    public UsersController(IUnitOfWork unitOfWork, IMapper mapper, IEventHub eventHub)
+    public UsersController(IUnitOfWork unitOfWork, IMapper mapper, IEventHub eventHub,
+        ILocalizationService localizationService)
     {
         _unitOfWork = unitOfWork;
         _mapper = mapper;
         _eventHub = eventHub;
+        _localizationService = localizationService;
     }
 
     [Authorize(Policy = "RequireAdminRole")]
@@ -33,9 +40,12 @@ public class UsersController : BaseApiController
         var user = await _unitOfWork.UserRepository.GetUserByUsernameAsync(username);
         _unitOfWork.UserRepository.Delete(user);
 
+        //(TODO: After updating a role or removing a user, delete their token)
+        // await _userManager.RemoveAuthenticationTokenAsync(user, TokenOptions.DefaultProvider, RefreshTokenName);
+
         if (await _unitOfWork.CommitAsync()) return Ok();
 
-        return BadRequest("Could not delete the user.");
+        return BadRequest(await _localizationService.Translate(User.GetUserId(), "generic-user-delete"));
     }
 
     /// <summary>
@@ -61,25 +71,32 @@ public class UsersController : BaseApiController
     [HttpGet("has-reading-progress")]
     public async Task<ActionResult<bool>> HasReadingProgress(int libraryId)
     {
-        var userId = await _unitOfWork.UserRepository.GetUserIdByUsernameAsync(User.GetUsername());
         var library = await _unitOfWork.LibraryRepository.GetLibraryForIdAsync(libraryId);
-        if (library == null) return BadRequest("Library does not exist");
-        return Ok(await _unitOfWork.AppUserProgressRepository.UserHasProgress(library.Type, userId));
+        if (library == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "library-doesnt-exist"));
+        return Ok(await _unitOfWork.AppUserProgressRepository.UserHasProgress(library.Type, User.GetUserId()));
     }
 
     [HttpGet("has-library-access")]
-    public async Task<ActionResult<bool>> HasLibraryAccess(int libraryId)
+    public ActionResult<bool> HasLibraryAccess(int libraryId)
     {
-        var libs = await _unitOfWork.LibraryRepository.GetLibraryDtosForUsernameAsync(User.GetUsername());
+        var libs = _unitOfWork.LibraryRepository.GetLibraryDtosForUsernameAsync(User.GetUsername());
         return Ok(libs.Any(x => x.Id == libraryId));
     }
 
+    /// <summary>
+    /// Update the user preferences
+    /// </summary>
+    /// <remarks>If the user has ReadOnly role, they will not be able to perform this action</remarks>
+    /// <param name="preferencesDto"></param>
+    /// <returns></returns>
     [HttpPost("update-preferences")]
     public async Task<ActionResult<UserPreferencesDto>> UpdatePreferences(UserPreferencesDto preferencesDto)
     {
         var user = await _unitOfWork.UserRepository.GetUserByUsernameAsync(User.GetUsername(),
             AppUserIncludes.UserPreferences);
         if (user == null) return Unauthorized();
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
+
         var existingPreferences = user!.UserPreferences;
 
         existingPreferences.ReadingDirection = preferencesDto.ReadingDirection;
@@ -104,21 +121,34 @@ public class UsersController : BaseApiController
         existingPreferences.GlobalPageLayoutMode = preferencesDto.GlobalPageLayoutMode;
         existingPreferences.BlurUnreadSummaries = preferencesDto.BlurUnreadSummaries;
         existingPreferences.LayoutMode = preferencesDto.LayoutMode;
-        existingPreferences.Theme = preferencesDto.Theme ?? await _unitOfWork.SiteThemeRepository.GetDefaultTheme();
         existingPreferences.PromptForDownloadSize = preferencesDto.PromptForDownloadSize;
         existingPreferences.NoTransitions = preferencesDto.NoTransitions;
         existingPreferences.SwipeToPaginate = preferencesDto.SwipeToPaginate;
         existingPreferences.CollapseSeriesRelationships = preferencesDto.CollapseSeriesRelationships;
+        existingPreferences.ShareReviews = preferencesDto.ShareReviews;
+
+        existingPreferences.PdfTheme = preferencesDto.PdfTheme;
+        existingPreferences.PdfScrollMode = preferencesDto.PdfScrollMode;
+        existingPreferences.PdfSpreadMode = preferencesDto.PdfSpreadMode;
+
+        if (preferencesDto.Theme != null && existingPreferences.Theme.Id != preferencesDto.Theme?.Id)
+        {
+            var theme = await _unitOfWork.SiteThemeRepository.GetTheme(preferencesDto.Theme!.Id);
+            existingPreferences.Theme = theme ?? await _unitOfWork.SiteThemeRepository.GetDefaultTheme();
+        }
+
+
+        if (_localizationService.GetLocales().Contains(preferencesDto.Locale))
+        {
+            existingPreferences.Locale = preferencesDto.Locale;
+        }
 
         _unitOfWork.UserRepository.Update(existingPreferences);
 
-        if (await _unitOfWork.CommitAsync())
-        {
-            await _eventHub.SendMessageToAsync(MessageFactory.UserUpdate, MessageFactory.UserUpdateEvent(user.Id, user.UserName!), user.Id);
-            return Ok(preferencesDto);
-        }
+        if (!await _unitOfWork.CommitAsync()) return BadRequest(await _localizationService.Translate(User.GetUserId(), "generic-user-pref"));
 
-        return BadRequest("There was an issue saving preferences.");
+        await _eventHub.SendMessageToAsync(MessageFactory.UserUpdate, MessageFactory.UserUpdateEvent(user.Id, user.UserName!), user.Id);
+        return Ok(preferencesDto);
     }
 
     /// <summary>

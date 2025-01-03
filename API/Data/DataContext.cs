@@ -7,6 +7,7 @@ using API.Entities.Enums;
 using API.Entities.Enums.UserPreferences;
 using API.Entities.Interfaces;
 using API.Entities.Metadata;
+using API.Entities.Scrobble;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
@@ -35,6 +36,7 @@ public sealed class DataContext : IdentityDbContext<AppUser, AppRole, int,
     public DbSet<ServerSetting> ServerSetting { get; set; } = null!;
     public DbSet<AppUserPreferences> AppUserPreferences { get; set; } = null!;
     public DbSet<SeriesMetadata> SeriesMetadata { get; set; } = null!;
+    [Obsolete]
     public DbSet<CollectionTag> CollectionTag { get; set; } = null!;
     public DbSet<AppUserBookmark> AppUserBookmark { get; set; } = null!;
     public DbSet<ReadingList> ReadingList { get; set; } = null!;
@@ -47,6 +49,25 @@ public sealed class DataContext : IdentityDbContext<AppUser, AppRole, int,
     public DbSet<FolderPath> FolderPath { get; set; } = null!;
     public DbSet<Device> Device { get; set; } = null!;
     public DbSet<ServerStatistics> ServerStatistics { get; set; } = null!;
+    public DbSet<MediaError> MediaError { get; set; } = null!;
+    public DbSet<ScrobbleEvent> ScrobbleEvent { get; set; } = null!;
+    public DbSet<ScrobbleError> ScrobbleError { get; set; } = null!;
+    public DbSet<ScrobbleHold> ScrobbleHold { get; set; } = null!;
+    public DbSet<AppUserOnDeckRemoval> AppUserOnDeckRemoval { get; set; } = null!;
+    public DbSet<AppUserTableOfContent> AppUserTableOfContent { get; set; } = null!;
+    public DbSet<AppUserSmartFilter> AppUserSmartFilter { get; set; } = null!;
+    public DbSet<AppUserDashboardStream> AppUserDashboardStream { get; set; } = null!;
+    public DbSet<AppUserSideNavStream> AppUserSideNavStream { get; set; } = null!;
+    public DbSet<AppUserExternalSource> AppUserExternalSource { get; set; } = null!;
+    public DbSet<ExternalReview> ExternalReview { get; set; } = null!;
+    public DbSet<ExternalRating> ExternalRating { get; set; } = null!;
+    public DbSet<ExternalSeriesMetadata> ExternalSeriesMetadata { get; set; } = null!;
+    public DbSet<ExternalRecommendation> ExternalRecommendation { get; set; } = null!;
+    public DbSet<ManualMigrationHistory> ManualMigrationHistory { get; set; } = null!;
+    public DbSet<SeriesBlacklist> SeriesBlacklist { get; set; } = null!;
+    public DbSet<AppUserCollection> AppUserCollection { get; set; } = null!;
+    public DbSet<ChapterPeople> ChapterPeople { get; set; } = null!;
+    public DbSet<SeriesMetadataPeople> SeriesMetadataPeople { get; set; } = null!;
 
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -93,34 +114,95 @@ public sealed class DataContext : IdentityDbContext<AppUser, AppRole, int,
         builder.Entity<AppUserPreferences>()
             .Property(b => b.BookReaderWritingStyle)
             .HasDefaultValue(WritingStyle.Horizontal);
+        builder.Entity<AppUserPreferences>()
+            .Property(b => b.Locale)
+            .IsRequired(true)
+            .HasDefaultValue("en");
+
+        builder.Entity<Library>()
+            .Property(b => b.AllowScrobbling)
+            .HasDefaultValue(true);
+
+        builder.Entity<Chapter>()
+            .Property(b => b.WebLinks)
+            .HasDefaultValue(string.Empty);
+        builder.Entity<SeriesMetadata>()
+            .Property(b => b.WebLinks)
+            .HasDefaultValue(string.Empty);
+
+        builder.Entity<Chapter>()
+            .Property(b => b.ISBN)
+            .HasDefaultValue(string.Empty);
+
+        builder.Entity<AppUserDashboardStream>()
+            .Property(b => b.StreamType)
+            .HasDefaultValue(DashboardStreamType.SmartFilter);
+        builder.Entity<AppUserDashboardStream>()
+            .HasIndex(e => e.Visible)
+            .IsUnique(false);
+
+        builder.Entity<AppUserSideNavStream>()
+            .Property(b => b.StreamType)
+            .HasDefaultValue(SideNavStreamType.SmartFilter);
+        builder.Entity<AppUserSideNavStream>()
+            .HasIndex(e => e.Visible)
+            .IsUnique(false);
+
+        builder.Entity<ExternalSeriesMetadata>()
+            .HasOne(em => em.Series)
+            .WithOne(s => s.ExternalSeriesMetadata)
+            .HasForeignKey<ExternalSeriesMetadata>(em => em.SeriesId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        builder.Entity<AppUserCollection>()
+            .Property(b => b.AgeRating)
+            .HasDefaultValue(AgeRating.Unknown);
+
+        // Configure the many-to-many relationship for Movie and Person
+        builder.Entity<ChapterPeople>()
+            .HasKey(cp => new { cp.ChapterId, cp.PersonId, cp.Role });
+
+        builder.Entity<ChapterPeople>()
+            .HasOne(cp => cp.Chapter)
+            .WithMany(c => c.People)
+            .HasForeignKey(cp => cp.ChapterId);
+
+        builder.Entity<ChapterPeople>()
+            .HasOne(cp => cp.Person)
+            .WithMany(p => p.ChapterPeople)
+            .HasForeignKey(cp => cp.PersonId)
+            .OnDelete(DeleteBehavior.Cascade);
 
 
-        builder.Entity<Library>()
-            .Property(b => b.FolderWatching)
-            .HasDefaultValue(true);
-        builder.Entity<Library>()
-            .Property(b => b.IncludeInDashboard)
-            .HasDefaultValue(true);
-        builder.Entity<Library>()
-            .Property(b => b.IncludeInRecommended)
-            .HasDefaultValue(true);
-        builder.Entity<Library>()
-            .Property(b => b.IncludeInSearch)
-            .HasDefaultValue(true);
-        builder.Entity<Library>()
-            .Property(b => b.ManageCollections)
-            .HasDefaultValue(true);
+        builder.Entity<SeriesMetadataPeople>()
+            .HasKey(smp => new { smp.SeriesMetadataId, smp.PersonId, smp.Role });
+
+        builder.Entity<SeriesMetadataPeople>()
+            .HasOne(smp => smp.SeriesMetadata)
+            .WithMany(sm => sm.People)
+            .HasForeignKey(smp => smp.SeriesMetadataId);
+
+        builder.Entity<SeriesMetadataPeople>()
+            .HasOne(smp => smp.Person)
+            .WithMany(p => p.SeriesMetadataPeople)
+            .HasForeignKey(smp => smp.PersonId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 
-
+    #nullable enable
     private static void OnEntityTracked(object? sender, EntityTrackedEventArgs e)
     {
         if (e.FromQuery || e.Entry.State != EntityState.Added || e.Entry.Entity is not IEntityDate entity) return;
 
-        entity.Created = DateTime.Now;
         entity.LastModified = DateTime.Now;
-        entity.CreatedUtc = DateTime.UtcNow;
         entity.LastModifiedUtc = DateTime.UtcNow;
+
+        // This allows for mocking
+        if (entity.Created == DateTime.MinValue)
+        {
+            entity.Created = DateTime.Now;
+            entity.CreatedUtc = DateTime.UtcNow;
+        }
     }
 
     private static void OnEntityStateChanged(object? sender, EntityStateChangedEventArgs e)
@@ -129,6 +211,7 @@ public sealed class DataContext : IdentityDbContext<AppUser, AppRole, int,
         entity.LastModified = DateTime.Now;
         entity.LastModifiedUtc = DateTime.UtcNow;
     }
+    #nullable disable
 
     private void OnSaveChanges()
     {

@@ -5,10 +5,12 @@ using API.Entities.Interfaces;
 
 namespace API.Entities;
 
+#nullable enable
+
 /// <summary>
 /// This is a collection of <see cref="ReadingListItem"/> which represent individual chapters and an order.
 /// </summary>
-public class ReadingList : IEntityDate
+public class ReadingList : IEntityDate, IHasCoverImage
 {
     public int Id { get; init; }
     public required string Title { get; set; }
@@ -21,11 +23,9 @@ public class ReadingList : IEntityDate
     /// Reading lists that are promoted are only done by admins
     /// </summary>
     public bool Promoted { get; set; }
-    /// <summary>
-    /// Absolute path to the (managed) image file
-    /// </summary>
-    /// <remarks>The file is managed internally to Kavita's APPDIR</remarks>
     public string? CoverImage { get; set; }
+    public string? PrimaryColor { get; set; }
+    public string? SecondaryColor { get; set; }
     public bool CoverImageLocked { get; set; }
 
     /// <summary>
@@ -60,4 +60,9 @@ public class ReadingList : IEntityDate
     public int AppUserId { get; set; }
     public AppUser AppUser { get; set; } = null!;
 
+    public void ResetColorScape()
+    {
+        PrimaryColor = string.Empty;
+        SecondaryColor = string.Empty;
+    }
 }

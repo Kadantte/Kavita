@@ -2,6 +2,7 @@
 using API.Entities.Enums;
 
 namespace API.Data.Misc;
+#nullable enable
 
 public class RecentlyAddedSeries
 {
@@ -17,6 +18,6 @@ public class RecentlyAddedSeries
     public string? ChapterRange { get; init; }
     public string? ChapterTitle { get; init; }
     public bool IsSpecial { get; init; }
-    public int VolumeNumber { get; init; }
+    public float VolumeNumber { get; init; }
     public AgeRating AgeRating { get; init; }
 }

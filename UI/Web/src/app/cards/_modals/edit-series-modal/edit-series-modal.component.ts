@@ -1,12 +1,27 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, EventEmitter, Input, OnDestroy, OnInit } from '@angular/core';
-import { FormBuilder, FormControl, FormGroup, Validators } from '@angular/forms';
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
-import { forkJoin, Observable, of, Subject } from 'rxjs';
-import { map, takeUntil } from 'rxjs/operators';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component, DestroyRef,
+  EventEmitter,
+  inject,
+  Input,
+  OnInit
+} from '@angular/core';
+import {FormBuilder, FormControl, FormGroup, ReactiveFormsModule, Validators} from '@angular/forms';
+import {
+  NgbActiveModal, NgbCollapse,
+  NgbNav,
+  NgbNavContent,
+  NgbNavItem,
+  NgbNavLink,
+  NgbNavOutlet,
+  NgbTooltip
+} from '@ng-bootstrap/ng-bootstrap';
+import {forkJoin, Observable, of, tap} from 'rxjs';
+import { map } from 'rxjs/operators';
 import { Breakpoint, UtilityService } from 'src/app/shared/_services/utility.service';
 import { TypeaheadSettings } from 'src/app/typeahead/_models/typeahead-settings';
-import { Chapter } from 'src/app/_models/chapter';
-import { CollectionTag } from 'src/app/_models/collection-tag';
+import {Chapter, LooseLeafOrDefaultNumber, SpecialVolumeNumber} from 'src/app/_models/chapter';
 import { Genre } from 'src/app/_models/metadata/genre';
 import { AgeRatingDto } from 'src/app/_models/metadata/age-rating-dto';
 import { Language } from 'src/app/_models/metadata/language';
@@ -15,63 +30,152 @@ import { Person, PersonRole } from 'src/app/_models/metadata/person';
 import { Series } from 'src/app/_models/series';
 import { SeriesMetadata } from 'src/app/_models/metadata/series-metadata';
 import { Tag } from 'src/app/_models/tag';
-import { CollectionTagService } from 'src/app/_services/collection-tag.service';
 import { ImageService } from 'src/app/_services/image.service';
 import { LibraryService } from 'src/app/_services/library.service';
 import { MetadataService } from 'src/app/_services/metadata.service';
 import { SeriesService } from 'src/app/_services/series.service';
 import { UploadService } from 'src/app/_services/upload.service';
+import {takeUntilDestroyed} from "@angular/core/rxjs-interop";
+import {CommonModule} from "@angular/common";
+import {TypeaheadComponent} from "../../../typeahead/_components/typeahead.component";
+import {CoverImageChooserComponent} from "../../cover-image-chooser/cover-image-chooser.component";
+import {EditSeriesRelationComponent} from "../../edit-series-relation/edit-series-relation.component";
+import {SentenceCasePipe} from "../../../_pipes/sentence-case.pipe";
+import {MangaFormatPipe} from "../../../_pipes/manga-format.pipe";
+import {DefaultDatePipe} from "../../../_pipes/default-date.pipe";
+import {TimeAgoPipe} from "../../../_pipes/time-ago.pipe";
+import {TagBadgeComponent} from "../../../shared/tag-badge/tag-badge.component";
+import {PublicationStatusPipe} from "../../../_pipes/publication-status.pipe";
+import {BytesPipe} from "../../../_pipes/bytes.pipe";
+import {ImageComponent} from "../../../shared/image/image.component";
+import {DefaultValuePipe} from "../../../_pipes/default-value.pipe";
+import {translate, TranslocoModule} from "@jsverse/transloco";
+import {TranslocoDatePipe} from "@jsverse/transloco-locale";
+import {UtcToLocalTimePipe} from "../../../_pipes/utc-to-local-time.pipe";
+import {EditListComponent} from "../../../shared/edit-list/edit-list.component";
+import {AccountService} from "../../../_services/account.service";
+import {ToastrService} from "ngx-toastr";
+import {Volume} from "../../../_models/volume";
+import {Action, ActionFactoryService, ActionItem} from "../../../_services/action-factory.service";
+import {SettingButtonComponent} from "../../../settings/_components/setting-button/setting-button.component";
+import {ActionService} from "../../../_services/action.service";
+import {DownloadService} from "../../../shared/_services/download.service";
+import {SettingItemComponent} from "../../../settings/_components/setting-item/setting-item.component";
+import {ReadTimePipe} from "../../../_pipes/read-time.pipe";
 
 enum TabID {
   General = 0,
   Metadata = 1,
   People = 2,
-  CoverImage = 3,
-  Related = 4,
-  Info = 5,
+  WebLinks = 3,
+  CoverImage = 4,
+  Related = 5,
+  Info = 6,
+  Tasks = 7
 }
+
+export interface EditSeriesModalCloseResult {
+  success: boolean;
+  series: Series;
+  coverImageUpdate: boolean;
+  updateExternal: boolean
+}
+
+const blackList = [Action.Edit, Action.Info, Action.IncognitoRead, Action.Read, Action.SendTo,
+  Action.AddToWantToReadList, Action.AddToCollection, Action.AddToReadingList, Action.RemoveFromWantToReadList,
+  Action.RemoveFromWantToReadList];
 
 @Component({
   selector: 'app-edit-series-modal',
+  standalone: true,
+  imports: [
+    ReactiveFormsModule,
+    NgbNav,
+    NgbNavContent,
+    NgbNavItem,
+    NgbNavLink,
+    CommonModule,
+    TypeaheadComponent,
+    CoverImageChooserComponent,
+    EditSeriesRelationComponent,
+    SentenceCasePipe,
+    MangaFormatPipe,
+    DefaultDatePipe,
+    TimeAgoPipe,
+    TagBadgeComponent,
+    PublicationStatusPipe,
+    NgbTooltip,
+    BytesPipe,
+    ImageComponent,
+    NgbCollapse,
+    NgbNavOutlet,
+    DefaultValuePipe,
+    TranslocoModule,
+    TranslocoDatePipe,
+    UtcToLocalTimePipe,
+    EditListComponent,
+    SettingButtonComponent,
+    SettingItemComponent,
+    ReadTimePipe,
+  ],
   templateUrl: './edit-series-modal.component.html',
   styleUrls: ['./edit-series-modal.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class EditSeriesModalComponent implements OnInit, OnDestroy {
+export class EditSeriesModalComponent implements OnInit {
 
-  @Input() series!: Series;
+  public readonly modal = inject(NgbActiveModal);
+  private readonly seriesService = inject(SeriesService);
+  public readonly utilityService = inject(UtilityService);
+  private readonly fb = inject(FormBuilder);
+  public readonly imageService = inject(ImageService);
+  private readonly libraryService = inject(LibraryService);
+  private readonly uploadService = inject(UploadService);
+  private readonly metadataService = inject(MetadataService);
+  private readonly cdRef = inject(ChangeDetectorRef);
+  public readonly accountService = inject(AccountService);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly toastr = inject(ToastrService);
+  private readonly actionFactoryService = inject(ActionFactoryService);
+  private readonly actionService = inject(ActionService);
+  private readonly downloadService = inject(DownloadService);
+
+  protected readonly TabID = TabID;
+  protected readonly PersonRole = PersonRole;
+  protected readonly Breakpoint = Breakpoint;
+  protected readonly Action = Action;
+
+  @Input({required: true}) series!: Series;
+
+
   seriesVolumes: any[] = [];
   isLoadingVolumes = false;
   /**
    * A copy of the series from init. This is used to compare values for name fields to see if lock was modified
    */
   initSeries!: Series;
-
-  isCollapsed = true;
+  tasks = this.actionFactoryService.getActionablesForSettingsPage(this.actionFactoryService.getSeriesActions(this.runTask.bind(this)), blackList);
   volumeCollapsed: any = {};
-  tabs = ['General', 'Metadata', 'People', 'Cover Image', 'Related', 'Info'];
+  tabs = ['general-tab', 'metadata-tab', 'people-tab', 'web-links-tab', 'cover-image-tab', 'related-tab', 'info-tab', 'tasks-tab'];
   active = this.tabs[0];
-  activeTabId = TabID.General;
   editSeriesForm!: FormGroup;
   libraryName: string | undefined = undefined;
   size: number = 0;
-  private readonly onDestroy = new Subject<void>();
-  
+  hasForcedKPlus = false;
+  forceIsLoading = false;
 
 
   // Typeaheads
-  ageRatingSettings: TypeaheadSettings<AgeRatingDto> = new TypeaheadSettings();
-  publicationStatusSettings: TypeaheadSettings<PublicationStatusDto> = new TypeaheadSettings();
   tagsSettings: TypeaheadSettings<Tag> = new TypeaheadSettings();
   languageSettings: TypeaheadSettings<Language> = new TypeaheadSettings();
   peopleSettings: {[PersonRole: string]: TypeaheadSettings<Person>} = {};
-  collectionTagSettings: TypeaheadSettings<CollectionTag> = new TypeaheadSettings();
   genreSettings: TypeaheadSettings<Genre> = new TypeaheadSettings();
 
-
-  collectionTags: CollectionTag[] = [];
   tags: Tag[] = [];
   genres: Genre[] = [];
+  ageRatings: Array<AgeRatingDto> = [];
+  publicationStatuses: Array<PublicationStatusDto> = [];
+  validLanguages: Array<Language> = [];
 
   metadata!: SeriesMetadata;
   imageUrls: Array<string> = [];
@@ -79,49 +183,31 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
    * Selected Cover for uploading
    */
   selectedCover: string = '';
-
-  ageRatings: Array<AgeRatingDto> = [];
-  publicationStatuses: Array<PublicationStatusDto> = [];
-  validLanguages: Array<Language> = [];
-
   coverImageReset = false;
+  isAdmin: boolean = false;
 
   saveNestedComponents: EventEmitter<void> = new EventEmitter();
 
-  get Breakpoint(): typeof Breakpoint {
-    return Breakpoint;
-  }
-
-  get PersonRole() {
-    return PersonRole;
-  }
-
-  get TabID(): typeof TabID {
-    return TabID;
+  get WebLinks() {
+    return this.metadata?.webLinks.split(',') || [''];
   }
 
   getPersonsSettings(role: PersonRole) {
     return this.peopleSettings[role];
   }
 
-  constructor(public modal: NgbActiveModal,
-              private seriesService: SeriesService,
-              public utilityService: UtilityService,
-              private fb: FormBuilder,
-              public imageService: ImageService,
-              private libraryService: LibraryService,
-              private collectionService: CollectionTagService,
-              private uploadService: UploadService,
-              private metadataService: MetadataService, 
-              private readonly cdRef: ChangeDetectorRef) { }
-
   ngOnInit(): void {
     this.imageUrls.push(this.imageService.getSeriesCoverImage(this.series.id));
 
-    this.libraryService.getLibraryNames().pipe(takeUntil(this.onDestroy)).subscribe(names => {
+    this.libraryService.getLibraryNames().pipe(takeUntilDestroyed(this.destroyRef)).subscribe(names => {
       this.libraryName = names[this.series.libraryId];
     });
-    
+
+    this.accountService.isAdmin$.pipe(takeUntilDestroyed(this.destroyRef), tap(isAdmin => {
+      this.isAdmin = isAdmin;
+      this.cdRef.markForCheck();
+    })).subscribe();
+
     this.initSeries = Object.assign({}, this.series);
 
     this.editSeriesForm = this.fb.group({
@@ -168,43 +254,44 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
         this.editSeriesForm.get('publicationStatus')?.patchValue(this.metadata.publicationStatus);
         this.editSeriesForm.get('language')?.patchValue(this.metadata.language);
         this.editSeriesForm.get('releaseYear')?.patchValue(this.metadata.releaseYear);
+
         this.cdRef.markForCheck();
 
-        this.editSeriesForm.get('name')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('name')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.series.nameLocked = true;
           this.cdRef.markForCheck();
         });
 
-        this.editSeriesForm.get('sortName')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('sortName')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.series.sortNameLocked = true;
           this.cdRef.markForCheck();
         });
 
-        this.editSeriesForm.get('localizedName')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('localizedName')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.series.localizedNameLocked = true;
           this.cdRef.markForCheck();
         });
 
-        this.editSeriesForm.get('summary')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('summary')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.metadata.summaryLocked = true;
           this.metadata.summary = val;
           this.cdRef.markForCheck();
         });
 
 
-        this.editSeriesForm.get('ageRating')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('ageRating')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.metadata.ageRating = parseInt(val + '', 10);
           this.metadata.ageRatingLocked = true;
           this.cdRef.markForCheck();
         });
 
-        this.editSeriesForm.get('publicationStatus')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('publicationStatus')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.metadata.publicationStatus = parseInt(val + '', 10);
           this.metadata.publicationStatusLocked = true;
           this.cdRef.markForCheck();
         });
 
-        this.editSeriesForm.get('releaseYear')?.valueChanges.pipe(takeUntil(this.onDestroy)).subscribe(val => {
+        this.editSeriesForm.get('releaseYear')?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(val => {
           this.metadata.releaseYear = parseInt(val + '', 10);
           this.metadata.releaseYearLocked = true;
           this.cdRef.markForCheck();
@@ -228,8 +315,10 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
         this.volumeCollapsed[v.name] = true;
       });
       this.seriesVolumes.forEach(vol => {
-        vol.volumeFiles = vol.chapters?.sort(this.utilityService.sortChapters).map((c: Chapter) => c.files.map((f: any) => {
-          f.chapter = c.number;
+        //.sort(this.utilityService.sortChapters) (no longer needed, all data is sorted on the backend)
+        vol.volumeFiles = vol.chapters?.map((c: Chapter) => c.files.map((f: any) => {
+          // TODO: Identify how to fix this hack
+          f.chapter = c.range;
           return f;
         })).flat();
       });
@@ -247,49 +336,25 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     });
   }
 
-  ngOnDestroy() {
-    this.onDestroy.next();
-    this.onDestroy.complete();
+  formatVolumeName(volume: Volume) {
+    if (volume.minNumber === LooseLeafOrDefaultNumber) {
+      return translate('edit-series-modal.loose-leaf-volume');
+    } else if (volume.minNumber === SpecialVolumeNumber) {
+      return translate('edit-series-modal.specials-volume');
+    }
+    return translate('edit-series-modal.volume-num') + ' ' + volume.name;
   }
+
 
   setupTypeaheads() {
     forkJoin([
-      this.setupCollectionTagsSettings(),
       this.setupTagSettings(),
       this.setupGenreTypeahead(),
       this.setupPersonTypeahead(),
       this.setupLanguageTypeahead()
     ]).subscribe(results => {
-      this.collectionTags = this.metadata.collectionTags;
       this.cdRef.markForCheck();
     });
-  }
-
-  setupCollectionTagsSettings() {
-    this.collectionTagSettings.minCharacters = 0;
-    this.collectionTagSettings.multiple = true;
-    this.collectionTagSettings.id = 'collections';
-    this.collectionTagSettings.unique = true;
-    this.collectionTagSettings.addIfNonExisting = true;
-    this.collectionTagSettings.fetchFn = (filter: string) => this.fetchCollectionTags(filter).pipe(map(items => this.collectionTagSettings.compareFn(items, filter)));
-    this.collectionTagSettings.addTransformFn = ((title: string) => {
-      return {id: 0, title: title, promoted: false, coverImage: '', summary: '', coverImageLocked: false };
-    });
-    this.collectionTagSettings.compareFn = (options: CollectionTag[], filter: string) => {
-      return options.filter(m => this.utilityService.filter(m.title, filter));
-    }
-    this.collectionTagSettings.compareFnForAdd = (options: CollectionTag[], filter: string) => {
-      return options.filter(m => this.utilityService.filterMatches(m.title, filter));
-    }
-    this.collectionTagSettings.selectionCompareFn = (a: CollectionTag, b: CollectionTag) => {
-      return a.title === b.title;
-    }
-
-    if (this.metadata.collectionTags) {
-      this.collectionTagSettings.savedData = this.metadata.collectionTags;
-    }
-
-    return of(true);
   }
 
   setupTagSettings() {
@@ -311,7 +376,7 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
       return {id: 0, title: title };
     });
     this.tagsSettings.selectionCompareFn = (a: Tag, b: Tag) => {
-      return a.id == b.id;
+      return a.title.toLowerCase() == b.title.toLowerCase();
     }
     this.tagsSettings.compareFnForAdd = (options: Tag[], filter: string) => {
       return options.filter(m => this.utilityService.filterMatches(m.title, filter));
@@ -341,7 +406,7 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
       return options.filter(m => this.utilityService.filterMatches(m.title, filter));
     }
     this.genreSettings.selectionCompareFn = (a: Genre, b: Genre) => {
-      return a.title == b.title;
+      return a.title.toLowerCase() == b.title.toLowerCase();
     }
 
     this.genreSettings.addTransformFn = ((title: string) => {
@@ -359,10 +424,11 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     if (presetField && presetField.length > 0) {
       const fetch = personSettings.fetchFn as ((filter: string) => Observable<Person[]>);
       return fetch('').pipe(map(people => {
-        const persetIds = presetField.map(p => p.id);
-        personSettings.savedData = people.filter(person => persetIds.includes(person.id));
+        const presetIds = presetField.map(p => p.id);
+        personSettings.savedData = people.filter(person => presetIds.includes(person.id));
         this.peopleSettings[role] = personSettings;
-        this.updatePerson(personSettings.savedData as Person[], role);
+        this.metadataService.updatePerson(this.metadata, personSettings.savedData as Person[], role);
+        this.cdRef.markForCheck();
         return true;
       }));
     } else {
@@ -391,10 +457,6 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
       return a.isoCode == b.isoCode;
     }
 
-    if (this.metadata.language === undefined || this.metadata.language === null || this.metadata.language === '') {
-      this.metadata.language = 'en';
-    }
-
     const l = this.validLanguages.find(l => l.isoCode === this.metadata.language);
     if (l !== undefined) {
       this.languageSettings.savedData = l;
@@ -415,7 +477,10 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
       this.updateFromPreset('letterer', this.metadata.letterers, PersonRole.Letterer),
       this.updateFromPreset('penciller', this.metadata.pencillers, PersonRole.Penciller),
       this.updateFromPreset('publisher', this.metadata.publishers, PersonRole.Publisher),
-      this.updateFromPreset('translator', this.metadata.translators, PersonRole.Translator)
+      this.updateFromPreset('imprint', this.metadata.imprints, PersonRole.Imprint),
+      this.updateFromPreset('translator', this.metadata.translators, PersonRole.Translator),
+      this.updateFromPreset('teams', this.metadata.teams, PersonRole.Team),
+      this.updateFromPreset('locations', this.metadata.locations, PersonRole.Location),
     ]).pipe(map(results => {
       return of(true);
     }));
@@ -423,12 +488,12 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
 
   fetchPeople(role: PersonRole, filter: string) {
     return this.metadataService.getAllPeople().pipe(map(people => {
-      return people.filter(p => p.role == role && this.utilityService.filter(p.name, filter));
+      return people.filter(p => this.utilityService.filter(p.name, filter));
     }));
   }
 
   createBlankPersonSettings(id: string, role: PersonRole) {
-    var personSettings = new TypeaheadSettings<Person>();
+    const personSettings = new TypeaheadSettings<Person>();
     personSettings.minCharacters = 0;
     personSettings.multiple = true;
     personSettings.showLocked = true;
@@ -443,45 +508,50 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     }
 
     personSettings.selectionCompareFn = (a: Person, b: Person) => {
-      return a.name == b.name && a.role == b.role;
+      return a.name == b.name;
     }
     personSettings.fetchFn = (filter: string) => {
       return this.fetchPeople(role, filter).pipe(map(items => personSettings.compareFn(items, filter)));
     };
 
     personSettings.addTransformFn = ((title: string) => {
-      return {id: 0, name: title, role: role };
+      return {id: 0, name: title, description: '', coverImageLocked: false, primaryColor: '', secondaryColor: '' };
     });
 
     return personSettings;
   }
 
   close() {
-    this.modal.close({success: false, series: undefined, coverImageUpdate: this.coverImageReset});
+    this.modal.close({success: false, series: undefined, coverImageUpdate: this.coverImageReset, updateExternal: this.hasForcedKPlus});
   }
 
-  fetchCollectionTags(filter: string = '') {
-    return this.collectionService.search(filter);
+  forceScan() {
+    this.forceIsLoading = true;
+    this.metadataService.forceRefreshFromPlus(this.series.id).subscribe(() => {
+      this.hasForcedKPlus = true;
+      this.forceIsLoading = false;
+      this.toastr.info(translate('toasts.force-kavita+-refresh-success'));
+      this.cdRef.markForCheck();
+    });
   }
 
-  formatChapterNumber(chapter: Chapter) {
-    if (chapter.number === '0') {
-      return '1';
-    }
-    return chapter.number;
+  updateWeblinks(items: Array<string>) {
+    this.metadata.webLinks = items.map(s => s.replaceAll(',', '%2C')).join(',');
   }
+
 
   save() {
     const model = this.editSeriesForm.value;
     const selectedIndex = this.editSeriesForm.get('coverImageIndex')?.value || 0;
 
     const apis = [
-      this.seriesService.updateMetadata(this.metadata, this.collectionTags)
+      this.seriesService.updateMetadata(this.metadata)
     ];
 
     // We only need to call updateSeries if we changed name, sort name, or localized name or reset a cover image
     const nameFieldsDirty = this.editSeriesForm.get('name')?.dirty || this.editSeriesForm.get('sortName')?.dirty || this.editSeriesForm.get('localizedName')?.dirty;
     const nameFieldLockChanged = this.series.nameLocked !== this.initSeries.nameLocked || this.series.sortNameLocked !== this.initSeries.sortNameLocked || this.series.localizedNameLocked !== this.initSeries.localizedNameLocked;
+
     if (nameFieldsDirty || nameFieldLockChanged || this.coverImageReset) {
       model.nameLocked = this.series.nameLocked;
       model.sortNameLocked = this.series.sortNameLocked;
@@ -491,21 +561,17 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     }
 
 
-    if (selectedIndex > 0 && this.selectedCover !== '') {
-      apis.push(this.uploadService.updateSeriesCoverImage(model.id, this.selectedCover));
+    if (selectedIndex > 0 || this.coverImageReset) {
+      apis.push(this.uploadService.updateSeriesCoverImage(model.id, this.selectedCover, !this.coverImageReset));
     }
 
     this.saveNestedComponents.emit();
 
     forkJoin(apis).subscribe(results => {
-      this.modal.close({success: true, series: model, coverImageUpdate: selectedIndex > 0 || this.coverImageReset});
+      this.modal.close({success: true, series: model, coverImageUpdate: selectedIndex > 0 || this.coverImageReset, updateExternal: this.hasForcedKPlus});
     });
   }
 
-  updateCollections(tags: CollectionTag[]) {
-    this.collectionTags = tags;
-    this.cdRef.markForCheck();
-  }
 
   updateTags(tags: Tag[]) {
     this.tags = tags;
@@ -519,47 +585,18 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     this.cdRef.markForCheck();
   }
 
+  updatePerson(persons: Person[], role: PersonRole) {
+    this.metadataService.updatePerson(this.metadata, persons, role);
+    this.metadata.locationLocked = true;
+    this.cdRef.markForCheck();
+  }
+
   updateLanguage(language: Array<Language>) {
     if (language.length === 0) {
       this.metadata.language = '';
       return;
     }
     this.metadata.language = language[0].isoCode;
-    this.cdRef.markForCheck();
-  }
-
-  updatePerson(persons: Person[], role: PersonRole) {
-    switch (role) {
-      case PersonRole.CoverArtist:
-        this.metadata.coverArtists = persons;
-        break;
-      case PersonRole.Character:
-        this.metadata.characters = persons;
-        break;
-      case PersonRole.Colorist:
-        this.metadata.colorists = persons;
-        break;
-      case PersonRole.Editor:
-        this.metadata.editors = persons;
-        break;
-      case PersonRole.Inker:
-        this.metadata.inkers = persons;
-        break;
-      case PersonRole.Letterer:
-        this.metadata.letterers = persons;
-        break;
-      case PersonRole.Penciller:
-        this.metadata.pencillers = persons;
-        break;
-      case PersonRole.Publisher:
-        this.metadata.publishers = persons;
-        break;
-      case PersonRole.Writer:
-        this.metadata.writers = persons;
-        break;
-      case PersonRole.Translator:
-        this.metadata.translators = persons;
-    }
     this.cdRef.markForCheck();
   }
 
@@ -590,4 +627,32 @@ export class EditSeriesModalComponent implements OnInit, OnDestroy {
     this.cdRef.markForCheck();
   }
 
+  async runTask(action: ActionItem<Series>) {
+    switch (action.action) {
+      case Action.Scan:
+        await this.actionService.scanSeries(this.series);
+        break;
+      case Action.RefreshMetadata:
+        await this.actionService.refreshSeriesMetadata(this.series);
+        break;
+      case Action.GenerateColorScape:
+        await this.actionService.refreshSeriesMetadata(this.series, undefined, false, true);
+        break;
+      case Action.AnalyzeFiles:
+        this.actionService.analyzeFilesForSeries(this.series);
+        break;
+      case Action.MarkAsRead:
+        this.actionService.markSeriesAsRead(this.series);
+        break;
+      case Action.MarkAsUnread:
+        this.actionService.markSeriesAsUnread(this.series);
+        break;
+      case Action.Delete:
+        await this.actionService.deleteSeries(this.series);
+        break;
+      case Action.Download:
+        this.downloadService.download('series', this.series);
+        break;
+    }
+  }
 }

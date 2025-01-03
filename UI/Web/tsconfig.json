@@ -6,13 +6,13 @@
     "outDir": "./dist/out-tsc",
     "removeComments": true,
     "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
     "strict": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "sourceMap": true,
     "resolveJsonModule": true,
     "declaration": false,
-    "downlevelIteration": true,
     "experimentalDecorators": true,
     "moduleResolution": "node",
     "importHelpers": true,
@@ -31,9 +31,10 @@
     "strictTemplates": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
     "extendedDiagnostics": {
       "nullishCoalescingNotNullable": "warning",
     }
-    
+
   }
 }

@@ -5,6 +5,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace API.Controllers;
 
+#nullable enable
+
 [AllowAnonymous]
 public class FallbackController : Controller
 {
@@ -18,7 +20,7 @@ public class FallbackController : Controller
         _taskScheduler = taskScheduler;
     }
 
-    public ActionResult Index()
+    public PhysicalFileResult Index()
     {
         return PhysicalFile(Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "index.html"), "text/HTML");
     }

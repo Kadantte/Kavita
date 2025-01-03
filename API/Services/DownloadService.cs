@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using API.Entities;
 using Microsoft.AspNetCore.StaticFiles;
+using MimeTypes;
 
 namespace API.Services;
 
@@ -34,6 +35,12 @@ public class DownloadService : IDownloadService
         // Figures out what the content type should be based on the file name.
         if (!_fileTypeProvider.TryGetContentType(filepath, out var contentType))
         {
+            if (contentType == null)
+            {
+                // Get extension
+                contentType = Path.GetExtension(filepath);
+            }
+
             contentType = Path.GetExtension(filepath).ToLowerInvariant() switch
             {
                 ".cbz" => "application/x-cbz",
@@ -47,7 +54,7 @@ public class DownloadService : IDownloadService
                 ".zip" => "application/zip",
                 ".tar.gz" => "application/gzip",
                 ".pdf" => "application/pdf",
-                _ => contentType
+                _ => MimeTypeMap.GetMimeType(contentType)
             };
         }
 

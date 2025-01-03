@@ -3,6 +3,7 @@ import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { take } from 'rxjs/operators';
 import { ConfirmDialogComponent } from './confirm-dialog/confirm-dialog.component';
 import { ConfirmConfig } from './confirm-dialog/_models/confirm-config';
+import {translate} from "@jsverse/transloco";
 
 @Injectable({
   providedIn: 'root'
@@ -32,6 +33,7 @@ export class ConfirmService {
 
       if (content !== undefined && config === undefined) {
         config = this.defaultConfirm;
+        config.header = translate('confirm.confirm');
         config.content = content;
       }
       if (content !== undefined && content !== '' && config!.content === '') {
@@ -58,11 +60,12 @@ export class ConfirmService {
       }
 
       if (content !== undefined && config === undefined) {
-        config = this.defaultConfirm;
+        config = this.defaultAlert;
+        config.header = translate('confirm.alert');
         config.content = content;
       }
 
-      const modalRef = this.modalService.open(ConfirmDialogComponent);
+      const modalRef = this.modalService.open(ConfirmDialogComponent, {size: "lg", fullscreen: "md"});
       modalRef.componentInstance.config = config;
       modalRef.closed.pipe(take(1)).subscribe(result => {
         return resolve(result);

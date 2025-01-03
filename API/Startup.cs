@@ -10,6 +10,7 @@ using System.Threading.RateLimiting;
 using System.Threading.Tasks;
 using API.Constants;
 using API.Data;
+using API.Data.ManualMigrations;
 using API.Entities;
 using API.Entities.Enums;
 using API.Extensions;
@@ -32,6 +33,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -107,6 +109,20 @@ public class Startup
                     Location = ResponseCacheLocation.Client,
                     NoStore = false
                 });
+            options.CacheProfiles.Add(ResponseCacheProfiles.LicenseCache,
+                new CacheProfile()
+                {
+                    Duration = TimeSpan.FromHours(4).Seconds,
+                    Location = ResponseCacheLocation.Client,
+                    NoStore = false
+                });
+            options.CacheProfiles.Add(ResponseCacheProfiles.KavitaPlus,
+                new CacheProfile()
+                {
+                    Duration = TimeSpan.FromDays(30).Seconds,
+                    Location = ResponseCacheLocation.Any,
+                    NoStore = false
+                });
         });
         services.Configure<ForwardedHeadersOptions>(options =>
         {
@@ -121,14 +137,14 @@ public class Startup
         {
             c.SwaggerDoc("v1", new OpenApiInfo
             {
-                Version = BuildInfo.Version.ToString(),
+                Version = "3.1.0",
                 Title = "Kavita",
-                Description = "Kavita provides a set of APIs that are authenticated by JWT. JWT token can be copied from local storage.",
+                Description = $"Kavita provides a set of APIs that are authenticated by JWT. JWT token can be copied from local storage. Assume all fields of a payload are required. Built against v{BuildInfo.Version.ToString()}",
                 License = new OpenApiLicense
                 {
                     Name = "GPL-3.0",
                     Url = new Uri("https://github.com/Kareadita/Kavita/blob/develop/LICENSE")
-                }
+                },
             });
 
             var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
@@ -160,7 +176,7 @@ public class Startup
                 Url = "{protocol}://{hostpath}",
                 Variables = new Dictionary<string, OpenApiServerVariable>
                 {
-                    { "protocol", new OpenApiServerVariable { Default = "http", Enum = new List<string> { "http", "https" } } },
+                    { "protocol", new OpenApiServerVariable { Default = "http", Enum = ["http", "https"]} },
                     { "hostpath", new OpenApiServerVariable { Default = "localhost:5000" } }
                 }
             });
@@ -171,7 +187,7 @@ public class Startup
             options.Providers.Add<GzipCompressionProvider>();
             options.MimeTypes =
                 ResponseCompressionDefaults.MimeTypes.Concat(
-                    new[] { "image/jpeg", "image/jpg" });
+                    new[] { "image/jpeg", "image/jpg", "image/png", "image/avif", "image/gif", "image/webp", "image/tiff" });
             options.EnableForHttps = true;
         });
         services.Configure<BrotliCompressionProviderOptions>(options =>
@@ -191,7 +207,7 @@ public class Startup
             .UseSimpleAssemblyNameTypeSerializer()
             .UseRecommendedSerializerSettings()
             .UseInMemoryStorage());
-            //.UseSQLiteStorage("config/Hangfire.db")); // UseSQLiteStorage - SQLite has some issues around resuming jobs when aborted (and locking can cause high utilization)
+            //.UseSQLiteStorage("config/Hangfire.db")); // UseSQLiteStorage - SQLite has some issues around resuming jobs when aborted (and locking can cause high utilization) (NOTE: There is code to clear jobs on startup a redditor gave me)
 
         // Add the processing server as IHostedService
         services.AddHangfireServer(options =>
@@ -209,64 +225,76 @@ public class Startup
         IDirectoryService directoryService, IUnitOfWork unitOfWork, IBackupService backupService, IImageService imageService)
     {
 
+        var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
         // Apply Migrations
         try
         {
             Task.Run(async () =>
                 {
                     // Apply all migrations on startup
-                    var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
-                    var userManager = serviceProvider.GetRequiredService<UserManager<AppUser>>();
-                    var themeService = serviceProvider.GetRequiredService<IThemeService>();
                     var dataContext = serviceProvider.GetRequiredService<DataContext>();
-                    var readingListService = serviceProvider.GetRequiredService<IReadingListService>();
 
 
                     logger.LogInformation("Running Migrations");
 
-                    // Only run this if we are upgrading
-                    await MigrateChangePasswordRoles.Migrate(unitOfWork, userManager);
-                    await MigrateRemoveExtraThemes.Migrate(unitOfWork, themeService);
+                    // v0.7.9
+                    await MigrateUserLibrarySideNavStream.Migrate(unitOfWork, dataContext, logger);
 
-                    // only needed for v0.5.4 and v0.6.0
-                    await MigrateNormalizedEverything.Migrate(unitOfWork, dataContext, logger);
+                    // v0.7.11
+                    await MigrateSmartFilterEncoding.Migrate(unitOfWork, dataContext, logger);
+                    await MigrateLibrariesToHaveAllFileTypes.Migrate(unitOfWork, dataContext, logger);
 
-                    // v0.6.0
-                    await MigrateChangeRestrictionRoles.Migrate(unitOfWork, userManager, logger);
-                    await MigrateReadingListAgeRating.Migrate(unitOfWork, dataContext, readingListService, logger);
 
-                    // v0.6.2 or v0.7
-                    await MigrateSeriesRelationsImport.Migrate(dataContext, logger);
+                    // v0.7.14
+                    await MigrateEmailTemplates.Migrate(directoryService, logger);
+                    await MigrateVolumeNumber.Migrate(dataContext, logger);
+                    await MigrateWantToReadImport.Migrate(unitOfWork, dataContext, directoryService, logger);
+                    await MigrateManualHistory.Migrate(dataContext, logger);
+                    await MigrateClearNightlyExternalSeriesRecords.Migrate(dataContext, logger);
 
-                    // v0.6.8 or v0.7
-                    await MigrateUserProgressLibraryId.Migrate(unitOfWork, logger);
-                    await MigrateToUtcDates.Migrate(unitOfWork, dataContext, logger);
+                    // v0.8.0
+                    await MigrateVolumeLookupName.Migrate(dataContext, unitOfWork, logger);
+                    await MigrateChapterNumber.Migrate(dataContext, logger);
+                    await MigrateProgressExport.Migrate(dataContext, directoryService, logger);
+                    await MigrateMixedSpecials.Migrate(dataContext, unitOfWork, directoryService, logger);
+                    await MigrateLooseLeafChapters.Migrate(dataContext, unitOfWork, directoryService, logger);
+                    await MigrateChapterFields.Migrate(dataContext, unitOfWork, logger);
+                    await MigrateChapterRange.Migrate(dataContext, unitOfWork, logger);
+                    await MigrateMangaFilePath.Migrate(dataContext, logger);
+                    await MigrateCollectionTagToUserCollections.Migrate(dataContext, unitOfWork, logger);
 
-                    // v0.7
-                    await MigrateBrokenGMT1Dates.Migrate(unitOfWork, dataContext, logger);
+                    // v0.8.1
+                    await MigrateLowestSeriesFolderPath.Migrate(dataContext, unitOfWork, logger);
 
-                    // v0.7.2
-                    await MigrateLoginRoles.Migrate(unitOfWork, userManager, logger);
+                    // v0.8.2
+                    await ManualMigrateThemeDescription.Migrate(dataContext, logger);
+                    await MigrateInitialInstallData.Migrate(dataContext, logger, directoryService);
+                    await MigrateSeriesLowestFolderPath.Migrate(dataContext, logger, directoryService);
+
+                    // v0.8.4
+                    await MigrateLowestSeriesFolderPath2.Migrate(dataContext, unitOfWork, logger);
+                    await ManualMigrateRemovePeople.Migrate(dataContext, logger);
+                    await MigrateDuplicateDarkTheme.Migrate(dataContext, logger);
+                    await ManualMigrateUnscrobbleBookLibraries.Migrate(dataContext, logger);
 
                     //  Update the version in the DB after all migrations are run
                     var installVersion = await unitOfWork.SettingsRepository.GetSettingAsync(ServerSettingKey.InstallVersion);
                     installVersion.Value = BuildInfo.Version.ToString();
                     unitOfWork.SettingsRepository.Update(installVersion);
-
                     await unitOfWork.CommitAsync();
-                    logger.LogInformation("Running Migrations - done");
+
+                    logger.LogInformation("Running Migrations - complete");
                 }).GetAwaiter()
                 .GetResult();
         }
         catch (Exception ex)
         {
-            var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
             logger.LogCritical(ex, "An error occurred during migration");
         }
 
-
-
         app.UseMiddleware<ExceptionMiddleware>();
+        app.UseMiddleware<SecurityEventMiddleware>();
+
 
         if (env.IsDevelopment())
         {
@@ -294,8 +322,17 @@ public class Startup
         {
             // We don't update the index.html in local as we don't serve from there
             UpdateBaseUrlInIndex(basePath);
-        }
 
+            // Update DB with what's in config
+            var dataContext = serviceProvider.GetRequiredService<DataContext>();
+            var setting = dataContext.ServerSetting.SingleOrDefault(x => x.Key == ServerSettingKey.BaseUrl);
+            if (setting != null)
+            {
+                setting.Value = basePath;
+            }
+
+            dataContext.SaveChanges();
+        }
 
         app.UseRouting();
 
@@ -306,7 +343,7 @@ public class Startup
                 .AllowAnyHeader()
                 .AllowAnyMethod()
                 .AllowCredentials() // For SignalR token query param
-                .WithOrigins("http://localhost:4200", $"http://{GetLocalIpAddress()}:4200", $"http://{GetLocalIpAddress()}:5000", "https://kavita.majora2007.duckdns.org")
+                .WithOrigins("http://localhost:4200", $"http://{GetLocalIpAddress()}:4200", $"http://{GetLocalIpAddress()}:5000")
                 .WithExposedHeaders("Content-Disposition", "Pagination"));
         }
         else
@@ -316,7 +353,6 @@ public class Startup
                 .AllowAnyHeader()
                 .AllowAnyMethod()
                 .AllowCredentials() // For SignalR token query param
-                .WithOrigins("https://kavita.majora2007.duckdns.org")
                 .WithExposedHeaders("Content-Disposition", "Pagination"));
         }
 
@@ -330,7 +366,14 @@ public class Startup
 
         app.UseStaticFiles(new StaticFileOptions
         {
-            ContentTypeProvider = new FileExtensionContentTypeProvider(),
+            // bcmap files needed for PDF reader localizations (https://github.com/Kareadita/Kavita/issues/2970)
+            ContentTypeProvider = new FileExtensionContentTypeProvider
+            {
+                Mappings =
+                {
+                    [".bcmap"] = "application/octet-stream"
+                }
+            },
             HttpsCompression = HttpsCompressionMode.Compress,
             OnPrepareResponse = ctx =>
             {
@@ -343,6 +386,7 @@ public class Startup
             =>
         {
             opts.EnrichDiagnosticContext = LogEnricher.EnrichFromRequest;
+            opts.IncludeQueryInRequestPath = true;
         });
 
         app.Use(async (context, next) =>
@@ -350,11 +394,19 @@ public class Startup
             context.Response.Headers[HeaderNames.Vary] =
                 new[] { "Accept-Encoding" };
 
-            // Don't let the site be iframed outside the same origin (clickjacking)
-            context.Response.Headers.XFrameOptions = Configuration.XFrameOptions;
 
-            // Setup CSP to ensure we load assets only from these origins
-            context.Response.Headers.Add("Content-Security-Policy", "frame-ancestors 'none';");
+            if (!Configuration.AllowIFraming)
+            {
+                // Don't let the site be iframed outside the same origin (clickjacking)
+                context.Response.Headers.XFrameOptions = "SAMEORIGIN";
+
+                // Setup CSP to ensure we load assets only from these origins
+                context.Response.Headers.Add("Content-Security-Policy", "frame-ancestors 'none';");
+            }
+            else
+            {
+                logger.LogCritical("appsetting.json has allow iframing on! This may allow for clickjacking on the server. User beware");
+            }
 
             await next();
         });
@@ -364,7 +416,10 @@ public class Startup
             endpoints.MapControllers();
             endpoints.MapHub<MessageHub>("hubs/messages");
             endpoints.MapHub<LogHub>("hubs/logs");
-            endpoints.MapHangfireDashboard();
+            if (env.IsDevelopment())
+            {
+                endpoints.MapHangfireDashboard();
+            }
             endpoints.MapFallbackToController("Index", "Fallback");
         });
 
@@ -373,25 +428,22 @@ public class Startup
         {
             try
             {
-                var logger = serviceProvider.GetRequiredService<ILogger<Startup>>();
                 logger.LogInformation("Kavita - v{Version}", BuildInfo.Version);
             }
             catch (Exception)
             {
                 /* Swallow Exception */
+                Console.WriteLine($"Kavita - v{BuildInfo.Version}");
             }
-            Console.WriteLine($"Kavita - v{BuildInfo.Version}");
         });
 
-        var _logger = serviceProvider.GetRequiredService<ILogger<Startup>>();
-        _logger.LogInformation("Starting with base url as {BaseUrl}", basePath);
+        logger.LogInformation("Starting with base url as {BaseUrl}", basePath);
     }
 
     private static void UpdateBaseUrlInIndex(string baseUrl)
     {
         try
         {
-            if (new OsInfo(Array.Empty<IOsVersionAdapter>()).IsDocker) return;
             var htmlDoc = new HtmlDocument();
             var indexHtmlPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "index.html");
             htmlDoc.Load(indexHtmlPath);
@@ -402,6 +454,11 @@ public class Startup
         }
         catch (Exception ex)
         {
+            if (ex is UnauthorizedAccessException && baseUrl.Equals(Configuration.DefaultBaseUrl) && OsInfo.IsDocker)
+            {
+                // Swallow the exception as the install is non-root and Docker
+                return;
+            }
             Log.Error(ex, "There was an error setting base url");
         }
     }

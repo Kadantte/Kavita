@@ -1,19 +1,22 @@
 ﻿using System.IO.Abstractions;
+using API.Constants;
 using API.Data;
 using API.Helpers;
 using API.Services;
+using API.Services.Plus;
 using API.Services.Tasks;
 using API.Services.Tasks.Metadata;
 using API.Services.Tasks.Scanner;
 using API.SignalR;
 using API.SignalR.Presence;
+using Kavita.Common;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
 namespace API.Extensions;
+
 
 public static class ApplicationServiceExtensions
 {
@@ -21,10 +24,10 @@ public static class ApplicationServiceExtensions
     {
         services.AddAutoMapper(typeof(AutoMapperProfiles).Assembly);
 
+        //services.AddScoped<DataContext>();
+
         services.AddScoped<IUnitOfWork, UnitOfWork>();
-        services.AddScoped<IDirectoryService, DirectoryService>();
         services.AddScoped<ITokenService, TokenService>();
-        services.AddScoped<IFileSystem, FileSystem>();
         services.AddScoped<IFileService, FileService>();
         services.AddScoped<ICacheHelper, CacheHelper>();
 
@@ -35,7 +38,6 @@ public static class ApplicationServiceExtensions
         services.AddScoped<IBackupService, BackupService>();
         services.AddScoped<ICleanupService, CleanupService>();
         services.AddScoped<IBookService, BookService>();
-        services.AddScoped<IImageService, ImageService>();
         services.AddScoped<IVersionUpdaterService, VersionUpdaterService>();
         services.AddScoped<IDownloadService, DownloadService>();
         services.AddScoped<IReaderService, ReaderService>();
@@ -45,32 +47,73 @@ public static class ApplicationServiceExtensions
         services.AddScoped<IBookmarkService, BookmarkService>();
         services.AddScoped<IThemeService, ThemeService>();
         services.AddScoped<ISeriesService, SeriesService>();
-        services.AddScoped<IProcessSeries, ProcessSeries>();
         services.AddScoped<IReadingListService, ReadingListService>();
         services.AddScoped<IDeviceService, DeviceService>();
         services.AddScoped<IStatisticService, StatisticService>();
+        services.AddScoped<IMediaErrorService, MediaErrorService>();
+        services.AddScoped<IMediaConversionService, MediaConversionService>();
+        services.AddScoped<IRecommendationService, RecommendationService>();
+        services.AddScoped<IStreamService, StreamService>();
 
         services.AddScoped<IScannerService, ScannerService>();
+        services.AddScoped<IProcessSeries, ProcessSeries>();
         services.AddScoped<IMetadataService, MetadataService>();
         services.AddScoped<IWordCountAnalyzerService, WordCountAnalyzerService>();
         services.AddScoped<ILibraryWatcher, LibraryWatcher>();
         services.AddScoped<ITachiyomiService, TachiyomiService>();
         services.AddScoped<ICollectionTagService, CollectionTagService>();
 
-        services.AddScoped<IPresenceTracker, PresenceTracker>();
+        services.AddScoped<IFileSystem, FileSystem>();
+        services.AddScoped<IDirectoryService, DirectoryService>();
         services.AddScoped<IEventHub, EventHub>();
+        services.AddScoped<IPresenceTracker, PresenceTracker>();
+        services.AddScoped<IImageService, ImageService>();
+        services.AddScoped<ICoverDbService, CoverDbService>();
 
-        services.AddSqLite(env);
+        services.AddScoped<ILocalizationService, LocalizationService>();
+
+
+        services.AddScoped<IScrobblingService, ScrobblingService>();
+        services.AddScoped<ILicenseService, LicenseService>();
+        services.AddScoped<IExternalMetadataService, ExternalMetadataService>();
+        services.AddScoped<ISmartCollectionSyncService, SmartCollectionSyncService>();
+
+        services.AddSqLite();
         services.AddSignalR(opt => opt.EnableDetailedErrors = true);
+
+        services.AddEasyCaching(options =>
+        {
+            options.UseInMemory(EasyCacheProfiles.Favicon);
+            options.UseInMemory(EasyCacheProfiles.License);
+            options.UseInMemory(EasyCacheProfiles.Library);
+            options.UseInMemory(EasyCacheProfiles.RevokedJwt);
+
+            // KavitaPlus stuff
+            options.UseInMemory(EasyCacheProfiles.KavitaPlusExternalSeries);
+        });
+
+        services.AddMemoryCache(options =>
+        {
+            options.SizeLimit = Configuration.CacheSize * 1024 * 1024; // 75 MB
+            options.CompactionPercentage = 0.1; // LRU compaction (10%)
+        });
+
+        services.AddSwaggerGen(g =>
+        {
+            g.UseInlineDefinitionsForEnums();
+        });
     }
 
-    private static void AddSqLite(this IServiceCollection services, IHostEnvironment env)
+    private static void AddSqLite(this IServiceCollection services)
     {
-        services.AddDbContext<DataContext>(options =>
+        services.AddDbContextPool<DataContext>(options =>
         {
-            options.UseSqlite("Data source=config/kavita.db");
+            options.UseSqlite("Data source=config/kavita.db", builder =>
+            {
+                builder.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
+            });
             options.EnableDetailedErrors();
-            options.EnableSensitiveDataLogging(env.IsDevelopment());
+            options.EnableSensitiveDataLogging();
         });
     }
 }

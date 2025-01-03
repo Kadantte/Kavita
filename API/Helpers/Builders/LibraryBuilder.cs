@@ -19,8 +19,32 @@ public class LibraryBuilder : IEntityBuilder<Library>
             Type = type,
             Series = new List<Series>(),
             Folders = new List<FolderPath>(),
-            AppUsers = new List<AppUser>()
+            AppUsers = new List<AppUser>(),
+            AllowScrobbling = type is LibraryType.LightNovel or LibraryType.Manga,
+            LibraryFileTypes = new List<LibraryFileTypeGroup>()
         };
+
+        _library.LibraryFileTypes.Add(new LibraryFileTypeGroup()
+        {
+            FileTypeGroup = FileTypeGroup.Archive
+        });
+        _library.LibraryFileTypes.Add(new LibraryFileTypeGroup()
+        {
+            FileTypeGroup = FileTypeGroup.Epub
+        });
+        _library.LibraryFileTypes.Add(new LibraryFileTypeGroup()
+        {
+            FileTypeGroup = FileTypeGroup.Images
+        });
+        _library.LibraryFileTypes.Add(new LibraryFileTypeGroup()
+        {
+            FileTypeGroup = FileTypeGroup.Pdf
+        });
+    }
+
+    public LibraryBuilder(Library library)
+    {
+        _library =  library;
     }
 
     public LibraryBuilder WithFolderPath(FolderPath folderPath)
@@ -41,6 +65,48 @@ public class LibraryBuilder : IEntityBuilder<Library>
     {
         _library.AppUsers ??= new List<AppUser>();
         _library.AppUsers.Add(appUser);
+        return this;
+    }
+
+    public LibraryBuilder WithFolders(List<FolderPath> folders)
+    {
+        _library.Folders = folders;
+        return this;
+    }
+
+    public LibraryBuilder WithFolderWatching(bool folderWatching)
+    {
+        _library.FolderWatching = folderWatching;
+        return this;
+    }
+
+    public LibraryBuilder WithIncludeInDashboard(bool toInclude)
+    {
+        _library.IncludeInDashboard = toInclude;
+        return this;
+    }
+
+    public LibraryBuilder WithIncludeInRecommended(bool toInclude)
+    {
+        _library.IncludeInRecommended = toInclude;
+        return this;
+    }
+
+    public LibraryBuilder WithManageCollections(bool toInclude)
+    {
+        _library.ManageCollections = toInclude;
+        return this;
+    }
+
+    public LibraryBuilder WithManageReadingLists(bool toInclude)
+    {
+        _library.ManageReadingLists = toInclude;
+        return this;
+    }
+
+    public LibraryBuilder WIthAllowScrobbling(bool allowScrobbling)
+    {
+        _library.AllowScrobbling = allowScrobbling;
         return this;
     }
 }

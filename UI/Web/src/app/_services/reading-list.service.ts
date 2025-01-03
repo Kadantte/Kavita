@@ -6,10 +6,9 @@ import { UtilityService } from '../shared/_services/utility.service';
 import { Person } from '../_models/metadata/person';
 import { PaginatedResult } from '../_models/pagination';
 import { ReadingList, ReadingListItem } from '../_models/reading-list';
-import { CblImportResult } from '../_models/reading-list/cbl/cbl-import-result.enum';
 import { CblImportSummary } from '../_models/reading-list/cbl/cbl-import-summary';
 import { TextResonse } from '../_types/text-response';
-import { ActionItem } from './action-factory.service';
+import {Action, ActionItem} from './action-factory.service';
 
 @Injectable({
   providedIn: 'root'
@@ -24,11 +23,12 @@ export class ReadingListService {
     return this.httpClient.get<ReadingList>(this.baseUrl + 'readinglist?readingListId=' + readingListId);
   }
 
-  getReadingLists(includePromoted: boolean = true, pageNum?: number, itemsPerPage?: number) {
+  getReadingLists(includePromoted: boolean = true, sortByLastModified: boolean = false, pageNum?: number, itemsPerPage?: number) {
     let params = new HttpParams();
     params = this.utilityService.addPaginationIfExists(params, pageNum, itemsPerPage);
 
-    return this.httpClient.post<PaginatedResult<ReadingList[]>>(this.baseUrl + 'readinglist/lists?includePromoted=' + includePromoted, {}, {observe: 'response', params}).pipe(
+    return this.httpClient.post<PaginatedResult<ReadingList[]>>(this.baseUrl + 'readinglist/lists?includePromoted=' + includePromoted
+    + '&sortByLastModified=' + sortByLastModified, {}, {observe: 'response', params}).pipe(
       map((response: any) => {
         return this.utilityService.createPaginatedResult(response, new PaginatedResult<ReadingList[]>());
       })
@@ -37,6 +37,10 @@ export class ReadingListService {
 
   getReadingListsForSeries(seriesId: number) {
     return this.httpClient.get<ReadingList[]>(this.baseUrl + 'readinglist/lists-for-series?seriesId=' + seriesId);
+  }
+
+  getReadingListsForChapter(chapterId: number) {
+    return this.httpClient.get<ReadingList[]>(this.baseUrl + 'readinglist/lists-for-chapter?chapterId=' + chapterId);
   }
 
   getListItems(readingListId: number) {
@@ -87,24 +91,40 @@ export class ReadingListService {
     return this.httpClient.post<string>(this.baseUrl + 'readinglist/remove-read?readingListId=' + readingListId, {}, TextResonse);
   }
 
-  actionListFilter(action: ActionItem<ReadingList>, readingList: ReadingList, isAdmin: boolean) {
-    if (readingList?.promoted && !isAdmin) return false;
+  actionListFilter(action: ActionItem<ReadingList>, readingList: ReadingList, canPromote: boolean) {
+
+    const isPromotionAction = action.action == Action.Promote || action.action == Action.UnPromote;
+
+    if (isPromotionAction) return canPromote;
     return true;
+
+    // if (readingList?.promoted && !isAdmin) return false;
+    // return true;
   }
-  
+
   nameExists(name: string) {
     return this.httpClient.get<boolean>(this.baseUrl + 'readinglist/name-exists?name=' + name);
   }
 
-  validateCbl(form: FormData) {
-    return this.httpClient.post<CblImportSummary>(this.baseUrl + 'cbl/validate', form);
+  validateCbl(form: FormData, dryRun: boolean, useComicVineMatching: boolean) {
+    return this.httpClient.post<CblImportSummary>(this.baseUrl + `cbl/validate?dryRun=${dryRun}&useComicVineMatching=${useComicVineMatching}`, form);
   }
 
-  importCbl(form: FormData) {
-    return this.httpClient.post<CblImportSummary>(this.baseUrl + 'cbl/import', form);
+  importCbl(form: FormData, dryRun: boolean, useComicVineMatching: boolean) {
+    return this.httpClient.post<CblImportSummary>(this.baseUrl + `cbl/import?dryRun=${dryRun}&useComicVineMatching=${useComicVineMatching}`, form);
   }
 
   getCharacters(readingListId: number) {
     return this.httpClient.get<Array<Person>>(this.baseUrl + 'readinglist/characters?readingListId=' + readingListId);
   }
+
+  promoteMultipleReadingLists(listIds: Array<number>, promoted: boolean) {
+    return this.httpClient.post(this.baseUrl + 'readinglist/promote-multiple', {readingListIds: listIds, promoted}, TextResonse);
+  }
+
+  deleteMultipleReadingLists(listIds: Array<number>) {
+    return this.httpClient.post(this.baseUrl + 'readinglist/delete-multiple', {readingListIds: listIds}, TextResonse);
+  }
+
+
 }

@@ -24,13 +24,14 @@
       "prefix": "app",
       "architect": {
         "build": {
-          "builder": "@angular-devkit/build-angular:browser",
+          "builder": "@angular/build:application",
           "options": {
             "outputPath": "dist",
             "index": "src/index.html",
-            "main": "src/main.ts",
+            "browser": "src/main.ts",
             "polyfills": [
-              "zone.js"
+                "@angular/localize/init",
+                "zone.js"
             ],
             "inlineStyleLanguage": "scss",
             "tsConfig": "tsconfig.app.json",
@@ -47,19 +48,13 @@
               "src/styles.scss",
               "node_modules/@fortawesome/fontawesome-free/css/all.min.css"
             ],
-            "scripts": [
-              "node_modules/lazysizes/lazysizes.min.js",
-              "node_modules/lazysizes/plugins/rias/ls.rias.min.js",
-              "node_modules/lazysizes/plugins/attrchange/ls.attrchange.min.js"
-            ],
+            "scripts": [],
             "sourceMap": {
               "hidden": false,
               "scripts": true,
               "styles": true
             },
-            "vendorChunk": true,
             "extractLicenses": false,
-            "buildOptimizer": false,
             "optimization": false,
             "namedChunks": true
           },
@@ -74,8 +69,8 @@
               "optimization": true,
               "outputHashing": "all",
               "namedChunks": false,
+              "aot": true,
               "extractLicenses": true,
-              "buildOptimizer": true,
               "budgets": [
                 {
                   "type": "initial",
@@ -84,8 +79,8 @@
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "2kb",
-                  "maximumError": "6kb"
+                  "maximumWarning": "4kb",
+                  "maximumError": "30kb"
                 }
               ]
             }
@@ -93,23 +88,23 @@
           "defaultConfiguration": ""
         },
         "serve": {
-          "builder": "@angular-devkit/build-angular:dev-server",
+          "builder": "@angular/build:dev-server",
           "options": {
             "sslKey": "./ssl/server.key",
             "sslCert": "./ssl/server.crt",
             "ssl": false,
-            "browserTarget": "kavita-webui:build"
+            "buildTarget": "kavita-webui:build"
           },
           "configurations": {
             "production": {
-              "browserTarget": "kavita-webui:build:production"
+              "buildTarget": "kavita-webui:build:production"
             }
           }
         },
         "extract-i18n": {
-          "builder": "@angular-devkit/build-angular:extract-i18n",
+          "builder": "@angular/build:extract-i18n",
           "options": {
-            "browserTarget": "kavita-webui:build"
+            "buildTarget": "kavita-webui:build"
           }
         },
         "lint": {

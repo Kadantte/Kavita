@@ -3,15 +3,15 @@ using API.Entities.Enums;
 using API.Entities.Interfaces;
 
 namespace API.DTOs;
+#nullable enable
 
-public class SeriesDto : IHasReadTimeEstimate
+public class SeriesDto : IHasReadTimeEstimate, IHasCoverImage
 {
     public int Id { get; init; }
     public string? Name { get; init; }
     public string? OriginalName { get; init; }
     public string? LocalizedName { get; init; }
     public string? SortName { get; init; }
-    public string? Summary { get; init; }
     public int Pages { get; init; }
     public bool CoverImageLocked { get; set; }
     /// <summary>
@@ -29,13 +29,13 @@ public class SeriesDto : IHasReadTimeEstimate
     /// <summary>
     /// Rating from logged in user. Calculated at API-time.
     /// </summary>
-    public int UserRating { get; set; }
+    public float UserRating { get; set; }
     /// <summary>
-    /// Review from logged in user. Calculated at API-time.
+    /// If the user has set the rating or not
     /// </summary>
-    public string? UserReview { get; set; }
-    public MangaFormat Format { get; set; }
+    public bool HasUserRated { get; set; }
 
+    public MangaFormat Format { get; set; }
     public DateTime Created { get; set; }
 
     public bool NameLocked { get; set; }
@@ -53,13 +53,28 @@ public class SeriesDto : IHasReadTimeEstimate
     /// <inheritdoc cref="IHasReadTimeEstimate.MaxHoursToRead"/>
     public int MaxHoursToRead { get; set; }
     /// <inheritdoc cref="IHasReadTimeEstimate.AvgHoursToRead"/>
-    public int AvgHoursToRead { get; set; }
+    public float AvgHoursToRead { get; set; }
     /// <summary>
     /// The highest level folder for this Series
     /// </summary>
     public string FolderPath { get; set; } = default!;
     /// <summary>
+    /// Lowest path (that is under library root) that contains all files for the series.
+    /// </summary>
+    /// <remarks><see cref="Services.Tasks.Scanner.Parser.Parser.NormalizePath"/> must be used before setting</remarks>
+    public string? LowestFolderPath { get; set; }
+    /// <summary>
     /// The last time the folder for this series was scanned
     /// </summary>
     public DateTime LastFolderScanned { get; set; }
+
+    public string? CoverImage { get; set; }
+    public string PrimaryColor { get; set; }
+    public string SecondaryColor { get; set; }
+
+    public void ResetColorScape()
+    {
+        PrimaryColor = string.Empty;
+        SecondaryColor = string.Empty;
+    }
 }

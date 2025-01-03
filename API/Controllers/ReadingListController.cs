@@ -16,18 +16,21 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace API.Controllers;
 
+#nullable enable
+
 [Authorize]
 public class ReadingListController : BaseApiController
 {
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IEventHub _eventHub;
     private readonly IReadingListService _readingListService;
+    private readonly ILocalizationService _localizationService;
 
-    public ReadingListController(IUnitOfWork unitOfWork, IEventHub eventHub, IReadingListService readingListService)
+    public ReadingListController(IUnitOfWork unitOfWork, IReadingListService readingListService,
+        ILocalizationService localizationService)
     {
         _unitOfWork = unitOfWork;
-        _eventHub = eventHub;
         _readingListService = readingListService;
+        _localizationService = localizationService;
     }
 
     /// <summary>
@@ -38,8 +41,7 @@ public class ReadingListController : BaseApiController
     [HttpGet]
     public async Task<ActionResult<IEnumerable<ReadingListDto>>> GetList(int readingListId)
     {
-        var userId = await _unitOfWork.UserRepository.GetUserIdByUsernameAsync(User.GetUsername());
-        return Ok(await _unitOfWork.ReadingListRepository.GetReadingListDtoByIdAsync(readingListId, userId));
+        return Ok(await _unitOfWork.ReadingListRepository.GetReadingListDtoByIdAsync(readingListId, User.GetUserId()));
     }
 
     /// <summary>
@@ -47,30 +49,41 @@ public class ReadingListController : BaseApiController
     /// </summary>
     /// <param name="includePromoted">Include Promoted Reading Lists along with user's Reading Lists. Defaults to true</param>
     /// <param name="userParams">Pagination parameters</param>
+    /// <param name="sortByLastModified">Sort by last modified (most recent first) or by title (alphabetical)</param>
     /// <returns></returns>
     [HttpPost("lists")]
-    public async Task<ActionResult<IEnumerable<ReadingListDto>>> GetListsForUser([FromQuery] UserParams userParams, bool includePromoted = true)
+    public async Task<ActionResult<IEnumerable<ReadingListDto>>> GetListsForUser([FromQuery] UserParams userParams,
+        bool includePromoted = true, bool sortByLastModified = false)
     {
-        var userId = await _unitOfWork.UserRepository.GetUserIdByUsernameAsync(User.GetUsername());
-        var items = await _unitOfWork.ReadingListRepository.GetReadingListDtosForUserAsync(userId, includePromoted,
-            userParams);
+        var items = await _unitOfWork.ReadingListRepository.GetReadingListDtosForUserAsync(User.GetUserId(), includePromoted,
+            userParams, sortByLastModified);
         Response.AddPaginationHeader(items.CurrentPage, items.PageSize, items.TotalCount, items.TotalPages);
 
         return Ok(items);
     }
 
     /// <summary>
-    /// Returns all Reading Lists the user has access to that have a series within it.
+    /// Returns all Reading Lists the user has access to that the given series within it.
     /// </summary>
     /// <param name="seriesId"></param>
     /// <returns></returns>
     [HttpGet("lists-for-series")]
     public async Task<ActionResult<IEnumerable<ReadingListDto>>> GetListsForSeries(int seriesId)
     {
-        var userId = await _unitOfWork.UserRepository.GetUserIdByUsernameAsync(User.GetUsername());
-        var items = await _unitOfWork.ReadingListRepository.GetReadingListDtosForSeriesAndUserAsync(userId, seriesId, true);
+        return Ok(await _unitOfWork.ReadingListRepository.GetReadingListDtosForSeriesAndUserAsync(User.GetUserId(),
+            seriesId, true));
+    }
 
-        return Ok(items);
+    /// <summary>
+    /// Returns all Reading Lists the user has access to that has the given chapter within it.
+    /// </summary>
+    /// <param name="chapterId"></param>
+    /// <returns></returns>
+    [HttpGet("lists-for-chapter")]
+    public async Task<ActionResult<IEnumerable<ReadingListDto>>> GetListsForChapter(int chapterId)
+    {
+        return Ok(await _unitOfWork.ReadingListRepository.GetReadingListDtosForChapterAndUserAsync(User.GetUserId(),
+            chapterId, true));
     }
 
     /// <summary>
@@ -95,17 +108,18 @@ public class ReadingListController : BaseApiController
     [HttpPost("update-position")]
     public async Task<ActionResult> UpdateListItemPosition(UpdateReadingListPosition dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         // Make sure UI buffers events
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
-        if (await _readingListService.UpdateReadingListItemPosition(dto)) return Ok("Updated");
+        if (await _readingListService.UpdateReadingListItemPosition(dto)) return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
 
 
-        return BadRequest("Couldn't update position");
+        return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-position"));
     }
 
     /// <summary>
@@ -116,18 +130,19 @@ public class ReadingListController : BaseApiController
     [HttpPost("delete-item")]
     public async Task<ActionResult> DeleteListItem(UpdateReadingListPosition dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
         if (await _readingListService.DeleteReadingListItem(dto))
         {
-            return Ok("Updated");
+            return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
         }
 
-        return BadRequest("Couldn't delete item");
+        return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-item-delete"));
     }
 
     /// <summary>
@@ -138,18 +153,20 @@ public class ReadingListController : BaseApiController
     [HttpPost("remove-read")]
     public async Task<ActionResult> DeleteReadFromList([FromQuery] int readingListId)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
+
         var user = await _readingListService.UserHasReadingListAccess(readingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
         if (await _readingListService.RemoveFullyReadItems(readingListId, user))
         {
-            return Ok("Updated");
+            return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
         }
 
-        return BadRequest("Could not remove read items");
+        return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-item-delete"));
     }
 
     /// <summary>
@@ -160,15 +177,17 @@ public class ReadingListController : BaseApiController
     [HttpDelete]
     public async Task<ActionResult> DeleteList([FromQuery] int readingListId)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(readingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
-        if (await _readingListService.DeleteReadingList(readingListId, user)) return Ok("List was deleted");
+        if (await _readingListService.DeleteReadingList(readingListId, user))
+            return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-deleted"));
 
-        return BadRequest("There was an issue deleting reading list");
+        return BadRequest(await _localizationService.Translate(User.GetUserId(), "generic-reading-list-delete"));
     }
 
     /// <summary>
@@ -179,6 +198,7 @@ public class ReadingListController : BaseApiController
     [HttpPost("create")]
     public async Task<ActionResult<ReadingListDto>> CreateList(CreateReadingListDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _unitOfWork.UserRepository.GetUserByUsernameAsync(User.GetUsername(), AppUserIncludes.ReadingLists);
         if (user == null) return Unauthorized();
 
@@ -188,7 +208,7 @@ public class ReadingListController : BaseApiController
         }
         catch (KavitaException ex)
         {
-            return BadRequest(ex.Message);
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), ex.Message));
         }
 
         return Ok(await _unitOfWork.ReadingListRepository.GetReadingListDtoByTitleAsync(user.Id, dto.Title));
@@ -202,13 +222,14 @@ public class ReadingListController : BaseApiController
     [HttpPost("update")]
     public async Task<ActionResult> UpdateList(UpdateReadingListDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var readingList = await _unitOfWork.ReadingListRepository.GetReadingListByIdAsync(dto.ReadingListId);
-        if (readingList == null) return BadRequest("List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
 
         var user = await _readingListService.UserHasReadingListAccess(readingList.Id, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
         try
@@ -217,10 +238,10 @@ public class ReadingListController : BaseApiController
         }
         catch (KavitaException ex)
         {
-            return BadRequest(ex.Message);
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), ex.Message));
         }
 
-        return Ok("Updated");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
     }
 
     /// <summary>
@@ -231,14 +252,15 @@ public class ReadingListController : BaseApiController
     [HttpPost("update-by-series")]
     public async Task<ActionResult> UpdateListBySeries(UpdateReadingListBySeriesDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
 
         var readingList = user.ReadingLists.SingleOrDefault(l => l.Id == dto.ReadingListId);
-        if (readingList == null) return BadRequest("Reading List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
         var chapterIdsForSeries =
             await _unitOfWork.SeriesRepository.GetChapterIdsForSeriesAsync(new [] {dto.SeriesId});
 
@@ -253,7 +275,7 @@ public class ReadingListController : BaseApiController
             if (_unitOfWork.HasChanges())
             {
                 await _unitOfWork.CommitAsync();
-                return Ok("Updated");
+                return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
             }
         }
         catch
@@ -261,7 +283,7 @@ public class ReadingListController : BaseApiController
             await _unitOfWork.RollbackAsync();
         }
 
-        return Ok("Nothing to do");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "nothing-to-do"));
     }
 
 
@@ -273,13 +295,14 @@ public class ReadingListController : BaseApiController
     [HttpPost("update-by-multiple")]
     public async Task<ActionResult> UpdateListByMultiple(UpdateReadingListByMultipleDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
         var readingList = user.ReadingLists.SingleOrDefault(l => l.Id == dto.ReadingListId);
-        if (readingList == null) return BadRequest("Reading List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
 
         var chapterIds = await _unitOfWork.VolumeRepository.GetChapterIdsByVolumeIds(dto.VolumeIds);
         foreach (var chapterId in dto.ChapterIds)
@@ -298,7 +321,7 @@ public class ReadingListController : BaseApiController
             if (_unitOfWork.HasChanges())
             {
                 await _unitOfWork.CommitAsync();
-                return Ok("Updated");
+                return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
             }
         }
         catch
@@ -306,7 +329,7 @@ public class ReadingListController : BaseApiController
             await _unitOfWork.RollbackAsync();
         }
 
-        return Ok("Nothing to do");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "nothing-to-do"));
     }
 
     /// <summary>
@@ -317,13 +340,14 @@ public class ReadingListController : BaseApiController
     [HttpPost("update-by-multiple-series")]
     public async Task<ActionResult> UpdateListByMultipleSeries(UpdateReadingListByMultipleSeriesDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
         var readingList = user.ReadingLists.SingleOrDefault(l => l.Id == dto.ReadingListId);
-        if (readingList == null) return BadRequest("Reading List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
 
         var ids = await _unitOfWork.SeriesRepository.GetChapterIdWithSeriesIdForSeriesAsync(dto.SeriesIds.ToArray());
 
@@ -341,7 +365,7 @@ public class ReadingListController : BaseApiController
             if (_unitOfWork.HasChanges())
             {
                 await _unitOfWork.CommitAsync();
-                return Ok("Updated");
+                return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
             }
         }
         catch
@@ -349,19 +373,20 @@ public class ReadingListController : BaseApiController
             await _unitOfWork.RollbackAsync();
         }
 
-        return Ok("Nothing to do");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "nothing-to-do"));
     }
 
     [HttpPost("update-by-volume")]
     public async Task<ActionResult> UpdateListByVolume(UpdateReadingListByVolumeDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
         var readingList = user.ReadingLists.SingleOrDefault(l => l.Id == dto.ReadingListId);
-        if (readingList == null) return BadRequest("Reading List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
 
         var chapterIdsForVolume =
             (await _unitOfWork.ChapterRepository.GetChaptersAsync(dto.VolumeId)).Select(c => c.Id).ToList();
@@ -377,7 +402,7 @@ public class ReadingListController : BaseApiController
             if (_unitOfWork.HasChanges())
             {
                 await _unitOfWork.CommitAsync();
-                return Ok("Updated");
+                return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
             }
         }
         catch
@@ -385,19 +410,20 @@ public class ReadingListController : BaseApiController
             await _unitOfWork.RollbackAsync();
         }
 
-        return Ok("Nothing to do");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "nothing-to-do"));
     }
 
     [HttpPost("update-by-chapter")]
     public async Task<ActionResult> UpdateListByChapter(UpdateReadingListByChapterDto dto)
     {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
         var user = await _readingListService.UserHasReadingListAccess(dto.ReadingListId, User.GetUsername());
         if (user == null)
         {
-            return BadRequest("You do not have permissions on this reading list or the list doesn't exist");
+            return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-permission"));
         }
         var readingList = user.ReadingLists.SingleOrDefault(l => l.Id == dto.ReadingListId);
-        if (readingList == null) return BadRequest("Reading List does not exist");
+        if (readingList == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "reading-list-doesnt-exist"));
 
         // If there are adds, tell tracking this has been modified
         if (await _readingListService.AddChaptersToReadingList(dto.SeriesId, new List<int>() { dto.ChapterId }, readingList))
@@ -410,7 +436,7 @@ public class ReadingListController : BaseApiController
             if (_unitOfWork.HasChanges())
             {
                 await _unitOfWork.CommitAsync();
-                return Ok("Updated");
+                return Ok(await _localizationService.Translate(User.GetUserId(), "reading-list-updated"));
             }
         }
         catch
@@ -418,7 +444,7 @@ public class ReadingListController : BaseApiController
             await _unitOfWork.RollbackAsync();
         }
 
-        return Ok("Nothing to do");
+        return Ok(await _localizationService.Translate(User.GetUserId(), "nothing-to-do"));
     }
 
     /// <summary>
@@ -446,7 +472,7 @@ public class ReadingListController : BaseApiController
     {
         var items = (await _unitOfWork.ReadingListRepository.GetReadingListItemsByIdAsync(readingListId)).ToList();
         var readingListItem = items.SingleOrDefault(rl => rl.ChapterId == currentChapterId);
-        if (readingListItem == null) return BadRequest("Id does not exist");
+        if (readingListItem == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "chapter-doesnt-exist"));
         var index = items.IndexOf(readingListItem) + 1;
         if (items.Count > index)
         {
@@ -467,7 +493,7 @@ public class ReadingListController : BaseApiController
     {
         var items = (await _unitOfWork.ReadingListRepository.GetReadingListItemsByIdAsync(readingListId)).ToList();
         var readingListItem = items.SingleOrDefault(rl => rl.ChapterId == currentChapterId);
-        if (readingListItem == null) return BadRequest("Id does not exist");
+        if (readingListItem == null) return BadRequest(await _localizationService.Translate(User.GetUserId(), "chapter-doesnt-exist"));
         var index = items.IndexOf(readingListItem) - 1;
         if (0 <= index)
         {
@@ -488,5 +514,62 @@ public class ReadingListController : BaseApiController
     {
         if (string.IsNullOrEmpty(name)) return true;
         return Ok(await _unitOfWork.ReadingListRepository.ReadingListExists(name));
+    }
+
+
+
+    /// <summary>
+    /// Promote/UnPromote multiple reading lists in one go. Will only update the authenticated user's reading lists and will only work if the user has promotion role
+    /// </summary>
+    /// <param name="dto"></param>
+    /// <returns></returns>
+    [HttpPost("promote-multiple")]
+    public async Task<ActionResult> PromoteMultipleReadingLists(PromoteReadingListsDto dto)
+    {
+        if (User.IsInRole(PolicyConstants.ReadOnlyRole)) return BadRequest(await _localizationService.Translate(User.GetUserId(), "permission-denied"));
+
+        // This needs to take into account owner as I can select other users cards
+        var userId = User.GetUserId();
+        if (!User.IsInRole(PolicyConstants.PromoteRole) && !User.IsInRole(PolicyConstants.AdminRole))
+        {
+            return BadRequest(await _localizationService.Translate(userId, "permission-denied"));
+        }
+
+        var readingLists = await _unitOfWork.ReadingListRepository.GetReadingListsByIds(dto.ReadingListIds);
+
+        foreach (var readingList in readingLists)
+        {
+            if (readingList.AppUserId != userId) continue;
+            readingList.Promoted = dto.Promoted;
+            _unitOfWork.ReadingListRepository.Update(readingList);
+        }
+
+        if (!_unitOfWork.HasChanges()) return Ok();
+        await _unitOfWork.CommitAsync();
+
+        return Ok();
+    }
+
+
+    /// <summary>
+    /// Delete multiple reading lists in one go
+    /// </summary>
+    /// <param name="dto"></param>
+    /// <returns></returns>
+    [HttpPost("delete-multiple")]
+    public async Task<ActionResult> DeleteMultipleReadingLists(DeleteReadingListsDto dto)
+    {
+        // This needs to take into account owner as I can select other users cards
+        var user = await _unitOfWork.UserRepository.GetUserByIdAsync(User.GetUserId(), AppUserIncludes.ReadingLists);
+        if (user == null) return Unauthorized();
+
+        user.ReadingLists = user.ReadingLists.Where(uc => !dto.ReadingListIds.Contains(uc.Id)).ToList();
+        _unitOfWork.UserRepository.Update(user);
+
+
+        if (!_unitOfWork.HasChanges()) return Ok();
+        await _unitOfWork.CommitAsync();
+
+        return Ok();
     }
 }
